@@ -59,6 +59,7 @@ endif()
 set(KERNEL_SOURCES
     src/kernels/ternary_pack.cu
     src/kernels/sparse_ternary.cu
+    src/kernels/inference_kernels.cu
 )
 if(SPBITNET_USE_CUSPARSELT)
     list(APPEND KERNEL_SOURCES src/cusparselt_backend.cu)
@@ -74,6 +75,7 @@ endif()
 # ---- Model loader library ----
 add_library(spbitnet_model STATIC
     src/model.cu
+    src/inference.cu
 )
 target_include_directories(spbitnet_model PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(spbitnet_model PUBLIC spbitnet_kernels nlohmann_json::nlohmann_json)
@@ -121,6 +123,12 @@ add_executable(spbitnet_model_tests
 )
 target_link_libraries(spbitnet_model_tests PRIVATE gtest_main spbitnet_model)
 add_test(NAME spbitnet_model_tests COMMAND spbitnet_model_tests)
+
+add_executable(spbitnet_inference_tests
+    tests/test_inference_kernels.cu
+)
+target_link_libraries(spbitnet_inference_tests PRIVATE gtest_main spbitnet_kernels)
+add_test(NAME spbitnet_inference_tests COMMAND spbitnet_inference_tests)
 
 if(SPBITNET_USE_CUSPARSELT)
     add_executable(spbitnet_cusparselt_tests

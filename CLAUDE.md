@@ -48,7 +48,7 @@ Artem has deep expertise in: C++ (15+ years, expert), CUDA (expert), GPU optimiz
 ## Code Style & Conventions
 
 - Namespaces: `spbitnet::` for all project code
-- Kernel naming: `sparse_ternary_*` for custom kernels, `cusparselt_*` for library wrappers
+- Kernel naming: `sparse_ternary_*` for custom sparsity kernels, `cusparselt_*` for library wrappers, descriptive names for inference ops (e.g. `rms_norm_kernel`, `attention_scores_kernel`, `rope_kernel`)
 - Error handling: `CUDA_CHECK()` macro for all CUDA calls, exceptions for host errors
 - Memory: explicit `cudaMalloc`/`cudaFree`, no smart pointers for device memory
 - Testing: Google Test for host, custom assertion macros for device code

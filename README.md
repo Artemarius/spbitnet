@@ -193,17 +193,16 @@ spbitnet/
 │   ├── sparse_ternary_kernels.h      # Sparse ternary CUDA kernel wrappers (unpack, GEMV)
 │   ├── cusparselt_backend.h          # cuSPARSELt RAII wrapper (2:4 sparse INT8 SpMMA)
 │   ├── model.h                       # Model loader (config, weights, GPU upload)
-│   └── generate.h                    # Text generation loop (planned)
+│   ├── inference.h                   # InferenceEngine: KV-cache, forward pass, generation
+│   └── inference_kernels.h           # Inference kernel wrappers (RMSNorm, RoPE, attention, etc.)
 ├── src/
 │   ├── kernels/
 │   │   ├── ternary_pack.cu           # Dense ternary unpack + GEMV kernels
 │   │   ├── sparse_ternary.cu         # Sparse ternary unpack + warp-per-row GEMV
-│   │   ├── rmsnorm.cu                # RMS normalization (planned)
-│   │   ├── rope.cu                   # Rotary positional embeddings (planned)
-│   │   ├── softmax.cu                # Numerically stable softmax (planned)
-│   │   └── activation.cu             # ReLU², SiLU activations (planned)
+│   │   └── inference_kernels.cu      # RMSNorm, RoPE, attention, softmax, ReLU², GEMV kernels
 │   ├── cusparselt_backend.cu         # cuSPARSELt prune/compress/SpMMA implementation
 │   ├── model.cu                      # Model loading: JSON parsing, binary I/O, GPU upload
+│   ├── inference.cu                  # Transformer forward pass + BitLinear orchestration
 │   └── main.cpp                      # CLI entry point (--model, --prompt, --max-tokens)
 ├── python/
 │   ├── convert_model.py              # HuggingFace → spbitnet format (2:4 sparsity + pack)
@@ -213,7 +212,8 @@ spbitnet/
 │   ├── test_ternary_pack.cu          # Dense: pack/unpack roundtrip, GPU unpack, GEMV
 │   ├── test_sparse_ternary.cu        # Sparse: pack/unpack, pruning, GPU unpack, GEMV
 │   ├── test_cusparselt.cu            # cuSPARSELt: pruning, GEMM correctness
-│   └── test_model_loader.cu          # Model loader: synthetic model → GPU load
+│   ├── test_model_loader.cu          # Model loader: synthetic model → GPU load
+│   └── test_inference_kernels.cu     # Inference: RMSNorm, RoPE, attention, softmax, GEMV
 ├── benchmarks/
 │   └── bench_kernels.cu              # GEMV + GEMM benchmarks (all kernel variants)
 ├── docs/                             # (planned)
