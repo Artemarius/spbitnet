@@ -67,15 +67,34 @@ Computation:        sub, add            sub, sub            (no multiplies!)
 
 ## Benchmarks
 
-> Measured on NVIDIA RTX 3060 (6 GB VRAM, 112 Tensor Cores), CUDA 12.8, Ubuntu 24.04 (WSL2)
+> Measured on NVIDIA RTX 3060 Laptop GPU (6 GB VRAM, 30 SMs, CC 8.6), CUDA 12.8, Ubuntu 24.04 (WSL2)
+
+### Phase 2: Dense Ternary GEMV vs cuBLAS INT8 GEMV
+
+Naive dense ternary GEMV (2-bit packed, add/sub only, 1 thread per row) compared against cuBLAS INT8 GEMM with n=1 (Tensor Core accelerated). Matrix dimensions match BitNet model layers.
+
+| Dimension | Ternary (us) | cuBLAS INT8 (us) | Speedup | BW Ratio |
+|-----------|-------------|-----------------|---------|----------|
+| 2048x2048 (attn proj) | 333.8 | 29.7 | 0.09x | 4.0x |
+| 5632x2048 (FFN up) | 333.8 | 57.3 | 0.17x | 4.0x |
+| 2048x5632 (FFN down) | 909.3 | 61.4 | 0.07x | 4.0x |
+| 2560x2560 (attn proj) | 306.2 | 31.8 | 0.10x | 4.0x |
+| 6912x2560 (FFN up) | 326.7 | 77.8 | 0.24x | 4.0x |
+| 2560x6912 (FFN down) | 845.8 | 76.8 | 0.09x | 4.0x |
+| 4096x4096 (large square) | 504.8 | 72.7 | 0.14x | 4.0x |
+| 8192x2560 (wide FFN) | 329.6 | 87.0 | 0.26x | 4.0x |
+
+The naive ternary kernel reads 4x less data but is 4-10x slower — cuBLAS leverages Tensor Core INT8 IMMA. Optimization (multi-thread-per-row, vectorized loads, shared memory) and sparsity (Phase 3) are needed to close the gap.
+
+### Future Benchmarks
 
 | Kernel | Dense BitNet | Sparse cuSPARSELt | Sparse Custom | Speedup |
 |--------|-------------|-------------------|---------------|---------|
-| Linear 2560×6912 (GEMV) | — tok/s | — tok/s | — tok/s | —× |
-| Linear 2560×6912 (GEMM, bs=8) | — tok/s | — tok/s | — tok/s | —× |
-| End-to-end (2B model) | — tok/s | — tok/s | — tok/s | —× |
+| Linear 2560x6912 (GEMV) | — | — | — | — |
+| Linear 2560x6912 (GEMM, bs=8) | — | — | — | — |
+| End-to-end (2B model) | — tok/s | — tok/s | — tok/s | — |
 
-*Benchmarks will be populated as phases complete.*
+*Will be populated as phases complete.*
 
 ## Build
 
@@ -93,8 +112,9 @@ Computation:        sub, add            sub, sub            (no multiplies!)
 ```bash
 git clone https://github.com/Artemarius/spbitnet.git
 cd spbitnet
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=86
-cmake --build build --config Release -j$(nproc)
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=86 \
+      -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
+cmake --build build -j$(nproc)
 ```
 
 ### Quick Start
@@ -110,7 +130,7 @@ python scripts/apply_sparsity.py --model models/bitnet-2b-4t/ --output models/bi
 ./build/spbitnet_infer --model models/bitnet-2b-4t-sparse/ --prompt "The future of AI is" --max-tokens 128
 
 # Run kernel benchmarks
-./build/spbitnet_bench --suite all --device 0
+./build/spbitnet_bench
 ```
 
 ## Project Structure
@@ -150,8 +170,8 @@ spbitnet/
 │   ├── test_ternary_pack.cu      # Pack/unpack roundtrip, GPU unpack, GEMV correctness
 │   ├── test_sparse_gemv.cu       # Sparse GEMV vs dense reference (planned)
 │   └── test_model.cpp            # End-to-end model validation (planned)
-├── benchmarks/                       # (planned)
-│   ├── bench_kernels.cu
+├── benchmarks/
+│   ├── bench_kernels.cu          # Dense ternary GEMV vs cuBLAS INT8 benchmark
 │   ├── bench_cusparselt.cu
 │   ├── bench_memory.cu
 │   └── bench_e2e.cpp

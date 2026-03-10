@@ -46,6 +46,7 @@ target_link_libraries(spbitnet_kernels PUBLIC cudart)
 add_executable(spbitnet_infer
     src/main.cpp
 )
+target_include_directories(spbitnet_infer PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_link_libraries(spbitnet_infer PRIVATE
     spbitnet_kernels
 )
@@ -53,10 +54,11 @@ if(SPBITNET_USE_CUSPARSELT)
     target_link_libraries(spbitnet_infer PRIVATE cusparseLt cusparse)
 endif()
 
-# ---- Benchmark binary (placeholder) ----
-# add_executable(spbitnet_bench
-#     benchmarks/bench_kernels.cu
-# )
+# ---- Benchmark binary ----
+add_executable(spbitnet_bench
+    benchmarks/bench_kernels.cu
+)
+target_link_libraries(spbitnet_bench PRIVATE spbitnet_kernels cublas)
 
 # ---- Google Test ----
 include(FetchContent)
