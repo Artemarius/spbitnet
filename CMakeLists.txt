@@ -76,6 +76,7 @@ endif()
 add_library(spbitnet_model STATIC
     src/model.cu
     src/inference.cu
+    src/tokenizer.cpp
 )
 target_include_directories(spbitnet_model PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(spbitnet_model PUBLIC spbitnet_kernels nlohmann_json::nlohmann_json)
@@ -129,6 +130,12 @@ add_executable(spbitnet_inference_tests
 )
 target_link_libraries(spbitnet_inference_tests PRIVATE gtest_main spbitnet_kernels)
 add_test(NAME spbitnet_inference_tests COMMAND spbitnet_inference_tests)
+
+add_executable(spbitnet_tokenizer_tests
+    tests/test_tokenizer.cpp
+)
+target_link_libraries(spbitnet_tokenizer_tests PRIVATE gtest_main spbitnet_model)
+add_test(NAME spbitnet_tokenizer_tests COMMAND spbitnet_tokenizer_tests)
 
 if(SPBITNET_USE_CUSPARSELT)
     add_executable(spbitnet_cusparselt_tests

@@ -1,10 +1,12 @@
 #include "spbitnet/cuda_utils.h"
 #include "spbitnet/inference.h"
 #include "spbitnet/model.h"
+#include "spbitnet/tokenizer.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -63,23 +65,54 @@ int main(int argc, char* argv[]) {
 
         const auto& cfg = model.config();
 
-        // --- Greedy text generation (token IDs only — no tokenizer yet) ---
-        printf("\n--- Generation (greedy, token IDs) ---\n");
-        printf("Prompt: \"%s\" (NOTE: no tokenizer yet, using BOS token)\n", prompt.c_str());
+        // Try to load tokenizer
+        std::unique_ptr<spbitnet::Tokenizer> tokenizer;
+        {
+            std::string tok_path = model_dir + "/tokenizer.json";
+            try {
+                tokenizer = std::make_unique<spbitnet::Tokenizer>(
+                    spbitnet::Tokenizer::load(tok_path));
+                printf("Tokenizer loaded (%d tokens)\n", tokenizer->vocab_size());
+            } catch (const std::exception& e) {
+                printf("Warning: tokenizer not available (%s)\n", e.what());
+            }
+        }
+
+        // Tokenize prompt
+        std::vector<int> prompt_ids;
+        if (tokenizer) {
+            prompt_ids = tokenizer->encode(prompt);
+            printf("Prompt: \"%s\" -> %d tokens [", prompt.c_str(),
+                   static_cast<int>(prompt_ids.size()));
+            for (size_t i = 0; i < prompt_ids.size(); ++i)
+                printf("%s%d", i ? ", " : "", prompt_ids[i]);
+            printf("]\n");
+        }
+
         printf("Max tokens: %d\n\n", max_tokens);
 
         std::vector<float> h_logits(cfg.vocab_size);
+
+        // Build input sequence: BOS + prompt tokens
+        std::vector<int> input_ids;
+        input_ids.push_back(cfg.bos_token_id);
+        input_ids.insert(input_ids.end(), prompt_ids.begin(), prompt_ids.end());
+
+        // Prefill: process all input tokens except the last
+        for (size_t i = 0; i + 1 < input_ids.size(); ++i)
+            engine.forward(input_ids[i]);
+
+        // Last input token starts generation
+        int token = input_ids.back();
+
+        printf("--- Generation ---\n");
+        if (tokenizer)
+            printf("%s", prompt.c_str());
+
         std::vector<int> generated;
-
-        // Start with BOS token
-        int token = cfg.bos_token_id;
-        generated.push_back(token);
-        printf("token[0] = %d (BOS)\n", token);
-
         for (int t = 0; t < max_tokens; ++t) {
             const float* d_logits = engine.forward(token);
 
-            // Copy logits to host
             CUDA_CHECK(cudaMemcpy(h_logits.data(), d_logits,
                                   cfg.vocab_size * sizeof(float),
                                   cudaMemcpyDeviceToHost));
@@ -90,19 +123,22 @@ int main(int argc, char* argv[]) {
                 - h_logits.begin());
 
             generated.push_back(token);
-            printf("token[%d] = %d", t + 1, token);
 
-            // Show top-1 logit value for debugging
-            printf("  (logit=%.2f)", h_logits[token]);
-            printf("\n");
-
-            if (token == cfg.eos_token_id) {
-                printf("(EOS)\n");
-                break;
+            if (tokenizer) {
+                printf("%s", tokenizer->decode_token(token).c_str());
+                fflush(stdout);
+            } else {
+                printf("token[%d] = %d  (logit=%.2f)\n",
+                       t, token, h_logits[token]);
             }
+
+            if (token == cfg.eos_token_id) break;
         }
 
-        printf("\nGenerated %d tokens total.\n", static_cast<int>(generated.size()));
+        if (tokenizer)
+            printf("\n");
+        printf("\n--- %d tokens generated ---\n",
+               static_cast<int>(generated.size()));
         spbitnet::print_vram_usage("after generation");
 
     } catch (const std::runtime_error& e) {

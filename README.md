@@ -172,7 +172,7 @@ python python/convert_model.py \
 # Inspect model structure without converting
 python python/convert_model.py --model microsoft/bitnet-b1.58-2B-4T-bf16 --dry-run
 
-# Run inference (Phase 5 — in progress)
+# Run inference (loads tokenizer from model dir for text I/O)
 ./build/spbitnet_infer --model models/bitnet-2b-4t-sparse/ --prompt "Hello" --max-tokens 32
 
 # Run kernel benchmarks
@@ -194,7 +194,8 @@ spbitnet/
 │   ├── cusparselt_backend.h          # cuSPARSELt RAII wrapper (2:4 sparse INT8 SpMMA)
 │   ├── model.h                       # Model loader (config, weights, GPU upload)
 │   ├── inference.h                   # InferenceEngine: KV-cache, forward pass, generation
-│   └── inference_kernels.h           # Inference kernel wrappers (RMSNorm, RoPE, attention, etc.)
+│   ├── inference_kernels.h           # Inference kernel wrappers (RMSNorm, RoPE, attention, etc.)
+│   └── tokenizer.h                   # Byte-level BPE tokenizer (Llama 3 / GPT-4 compatible)
 ├── src/
 │   ├── kernels/
 │   │   ├── ternary_pack.cu           # Dense ternary unpack + GEMV kernels
@@ -203,6 +204,7 @@ spbitnet/
 │   ├── cusparselt_backend.cu         # cuSPARSELt prune/compress/SpMMA implementation
 │   ├── model.cu                      # Model loading: JSON parsing, binary I/O, GPU upload
 │   ├── inference.cu                  # Transformer forward pass + BitLinear orchestration
+│   ├── tokenizer.cpp                 # BPE tokenizer: JSON loading, encode/decode, byte mapping
 │   └── main.cpp                      # CLI entry point (--model, --prompt, --max-tokens)
 ├── python/
 │   ├── convert_model.py              # HuggingFace → spbitnet format (2:4 sparsity + pack)
@@ -213,7 +215,8 @@ spbitnet/
 │   ├── test_sparse_ternary.cu        # Sparse: pack/unpack, pruning, GPU unpack, GEMV
 │   ├── test_cusparselt.cu            # cuSPARSELt: pruning, GEMM correctness
 │   ├── test_model_loader.cu          # Model loader: synthetic model → GPU load
-│   └── test_inference_kernels.cu     # Inference: RMSNorm, RoPE, attention, softmax, GEMV
+│   ├── test_inference_kernels.cu     # Inference: RMSNorm, RoPE, attention, softmax, GEMV
+│   └── test_tokenizer.cpp           # Tokenizer: encode/decode roundtrip, BPE, byte fallback
 ├── benchmarks/
 │   └── bench_kernels.cu              # GEMV + GEMM benchmarks (all kernel variants)
 ├── docs/                             # (planned)
