@@ -262,6 +262,30 @@ Model Model::load(const std::string& model_dir) {
             }
         }
 
+        // Sub-normalization weights (SubLN — applied after o_proj / down_proj)
+        {
+            std::string name = prefix + ".self_attn.attn_sub_norm";
+            if (weights.contains(name)) {
+                const auto& e = weights.at(name);
+                std::string file = model_dir + "/" + e.at("file").get<std::string>();
+                layer.d_attn_sub_norm = load_float32_tensor(
+                    file, cfg.hidden_size, m.total_gpu_bytes_
+                );
+            }
+        }
+        {
+            std::string name = prefix + ".mlp.ffn_sub_norm";
+            if (weights.contains(name)) {
+                const auto& e = weights.at(name);
+                std::string file = model_dir + "/" + e.at("file").get<std::string>();
+                // ffn_sub_norm has intermediate_size elements (applied to
+                // gate*up activation before down_proj)
+                layer.d_ffn_sub_norm = load_float32_tensor(
+                    file, cfg.intermediate_size, m.total_gpu_bytes_
+                );
+            }
+        }
+
         // Sparse ternary projections
         auto load_proj = [&](const std::string& proj_name, SparseLinear& dest) {
             std::string name = prefix + "." + proj_name;
@@ -315,6 +339,14 @@ void Model::free_gpu() {
         if (layer.d_post_attention_layernorm) {
             cudaFree(layer.d_post_attention_layernorm);
             layer.d_post_attention_layernorm = nullptr;
+        }
+        if (layer.d_attn_sub_norm) {
+            cudaFree(layer.d_attn_sub_norm);
+            layer.d_attn_sub_norm = nullptr;
+        }
+        if (layer.d_ffn_sub_norm) {
+            cudaFree(layer.d_ffn_sub_norm);
+            layer.d_ffn_sub_norm = nullptr;
         }
     }
     layers_.clear();
@@ -381,6 +413,10 @@ void Model::print_summary() const {
             norm_bytes += config_.hidden_size * sizeof(float);
         if (layer.d_post_attention_layernorm)
             norm_bytes += config_.hidden_size * sizeof(float);
+        if (layer.d_attn_sub_norm)
+            norm_bytes += config_.hidden_size * sizeof(float);
+        if (layer.d_ffn_sub_norm)
+            norm_bytes += config_.intermediate_size * sizeof(float);
         sparse_bytes += layer.q_proj.gpu_bytes();
         sparse_bytes += layer.k_proj.gpu_bytes();
         sparse_bytes += layer.v_proj.gpu_bytes();

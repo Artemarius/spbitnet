@@ -332,6 +332,82 @@ __global__ void relu2_mul_kernel(const half* __restrict__ gate,
 }
 
 // ---------------------------------------------------------------------------
+// Fused ReLU² + multiply with float32 output (avoids float16 overflow)
+//
+// relu²(gate) * up can exceed float16 max (65504) before sub-normalization
+// brings values back into range.  This variant keeps the output in float32
+// so that the subsequent RMSNorm (or float-to-half conversion) can handle it.
+// ---------------------------------------------------------------------------
+__global__ void relu2_mul_f32_kernel(const half* __restrict__ gate,
+                                     const half* __restrict__ up,
+                                     float* __restrict__ output,
+                                     int size) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= size) return;
+
+    float g    = __half2float(gate[i]);
+    float u    = __half2float(up[i]);
+    float relu = fmaxf(0.0f, g);
+    output[i]  = relu * relu * u;
+}
+
+// ---------------------------------------------------------------------------
+// RMSNorm with float32 input: y[i] = x[i] * w[i] * rsqrt(mean(x^2) + eps)
+//
+// Used after relu2_mul_f32 to normalize large intermediate MLP activations
+// back into float16 range.  Input is float32, output is float16.
+// ---------------------------------------------------------------------------
+__global__ void rms_norm_f32in_kernel(const float* __restrict__ input,
+                                      const float* __restrict__ weight,
+                                      half* __restrict__ output,
+                                      int size, float eps) {
+    __shared__ float shared_sum[8];
+
+    const int tid  = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+    const int num_warps = blockDim.x >> 5;
+
+    float local_sum = 0.0f;
+    for (int i = tid; i < size; i += blockDim.x) {
+        float val = input[i];
+        local_sum += val * val;
+    }
+
+    for (int offset = 16; offset > 0; offset >>= 1)
+        local_sum += __shfl_down_sync(0xFFFFFFFF, local_sum, offset);
+
+    if (lane == 0) shared_sum[warp] = local_sum;
+    __syncthreads();
+
+    if (warp == 0) {
+        float val = (lane < num_warps) ? shared_sum[lane] : 0.0f;
+        for (int offset = 16; offset > 0; offset >>= 1)
+            val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+        if (lane == 0) shared_sum[0] = val;
+    }
+    __syncthreads();
+
+    float scale = rsqrtf(shared_sum[0] / static_cast<float>(size) + eps);
+
+    for (int i = tid; i < size; i += blockDim.x) {
+        float val = input[i];
+        output[i] = __float2half(val * scale * weight[i]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Float32 to float16 conversion
+// ---------------------------------------------------------------------------
+__global__ void float_to_half_kernel(const float* __restrict__ input,
+                                     half* __restrict__ output,
+                                     int size) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= size) return;
+    output[i] = __float2half(input[i]);
+}
+
+// ---------------------------------------------------------------------------
 // Residual add: output[i] = a[i] + b[i]
 // ---------------------------------------------------------------------------
 __global__ void residual_add_kernel(const half* __restrict__ a,
@@ -455,6 +531,28 @@ void relu2_mul_gpu(const half* gate, const half* up, half* output, int size,
     constexpr int block = 256;
     int grid = (size + block - 1) / block;
     relu2_mul_kernel<<<grid, block, 0, stream>>>(gate, up, output, size);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void relu2_mul_f32_gpu(const half* gate, const half* up, float* output, int size,
+                       cudaStream_t stream) {
+    constexpr int block = 256;
+    int grid = (size + block - 1) / block;
+    relu2_mul_f32_kernel<<<grid, block, 0, stream>>>(gate, up, output, size);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void rms_norm_f32in_gpu(const float* input, const float* weight, half* output,
+                        int size, float eps, cudaStream_t stream) {
+    rms_norm_f32in_kernel<<<1, 256, 0, stream>>>(input, weight, output, size, eps);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void float_to_half_gpu(const float* input, half* output, int size,
+                       cudaStream_t stream) {
+    constexpr int block = 256;
+    int grid = (size + block - 1) / block;
+    float_to_half_kernel<<<grid, block, 0, stream>>>(input, output, size);
     CUDA_CHECK(cudaGetLastError());
 }
 

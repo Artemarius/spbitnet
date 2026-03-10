@@ -57,6 +57,20 @@ void attention_output_gpu(const float* scores, const half* V_cache, half* output
 void relu2_mul_gpu(const half* gate, const half* up, half* output, int size,
                    cudaStream_t stream = nullptr);
 
+/// Fused ReLU² + multiply with float32 output (avoids float16 overflow).
+/// relu²(gate) * up can exceed float16 max before sub-normalization.
+void relu2_mul_f32_gpu(const half* gate, const half* up, float* output, int size,
+                       cudaStream_t stream = nullptr);
+
+/// RMSNorm with float32 input, float16 output.
+/// Used after relu2_mul_f32 to normalize large intermediate activations.
+void rms_norm_f32in_gpu(const float* input, const float* weight, half* output,
+                        int size, float eps, cudaStream_t stream = nullptr);
+
+/// Convert float32 to float16 (element-wise).
+void float_to_half_gpu(const float* input, half* output, int size,
+                       cudaStream_t stream = nullptr);
+
 /// Element-wise residual add: output[i] = a[i] + b[i].
 void residual_add_gpu(const half* a, const half* b, half* output, int size,
                       cudaStream_t stream = nullptr);

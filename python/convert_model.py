@@ -56,6 +56,8 @@ LM_HEAD_NAMES = {"lm_head.weight"}
 NORM_SUFFIXES = (
     "input_layernorm.weight",
     "post_attention_layernorm.weight",
+    "self_attn.attn_sub_norm.weight",
+    "mlp.ffn_sub_norm.weight",
 )
 
 LINEAR_SUFFIXES = (
@@ -273,17 +275,24 @@ def export_sparse_layer(
     # 3. Apply mask
     sparse_ternary = ternary * mask.astype(np.int8)
 
-    # 4. Pack
+    # 4. Fix zeros at masked positions — the packed format can't represent
+    #    ternary 0 at a position marked non-zero in the bitmap (it defaults
+    #    to +1).  Force these positions to ±1 based on the original float sign.
+    zero_at_mask = mask & (sparse_ternary == 0)
+    sparse_ternary[zero_at_mask & (weight_f32 >= 0)] = +1
+    sparse_ternary[zero_at_mask & (weight_f32 < 0)] = -1
+
+    # 5. Pack
     meta, values, m_stride, v_stride = pack_sparse_ternary(sparse_ternary, mask)
 
-    # 5. Write binary files
+    # 6. Write binary files
     # Note: can't use with_suffix() because export names contain dots
     meta_path = Path(str(base_path) + ".meta")
     values_path = Path(str(base_path) + ".values")
     meta.tofile(str(meta_path))
     values.tofile(str(values_path))
 
-    # 6. Stats
+    # 7. Stats
     total = rows * cols
     nz_before = int(np.count_nonzero(ternary))
     nz_after = int(np.count_nonzero(sparse_ternary))
@@ -320,22 +329,27 @@ def load_model_weights(
     Handles bfloat16 → float32 conversion automatically.
     """
     import torch
-    from transformers import AutoConfig
     from huggingface_hub import snapshot_download
 
-    # Load config
-    print(f"Loading config from {model_path} ...")
-    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-    config_dict = config.to_dict()
-
-    # Download model files
-    print(f"Downloading model files (safetensors + json) ...")
+    # Download model files (config.json + weights)
+    print(f"Downloading model files from {model_path} ...")
     local_dir = snapshot_download(
         model_path,
         allow_patterns=["*.safetensors", "*.bin", "*.json"],
     )
     local_path = Path(local_dir)
     print(f"  Local cache: {local_dir}")
+
+    # Load config directly from JSON (avoids AutoConfig issues with
+    # auto_map pointing to missing custom code files)
+    config_path = local_path / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"config.json not found in {local_dir}")
+    with open(config_path) as f:
+        config_dict = json.load(f)
+    print(f"  Config loaded: {config_dict.get('model_type', 'unknown')} "
+          f"({config_dict.get('hidden_size', '?')}h, "
+          f"{config_dict.get('num_hidden_layers', '?')}L)")
 
     state_dict: Dict[str, np.ndarray] = {}
 
@@ -646,6 +660,10 @@ def verify_packing(rows: int = 64, cols: int = 256, seed: int = 42) -> bool:
     mask = generate_24_mask(latent)
     ternary, gamma = quantize_ternary_absmean(latent)
     sparse = ternary * mask.astype(np.int8)
+    # Fix zeros at masked positions (same as export_sparse_layer)
+    zero_at_mask = mask & (sparse == 0)
+    sparse[zero_at_mask & (latent >= 0)] = +1
+    sparse[zero_at_mask & (latent < 0)] = -1
     meta_v, values_v, ms, vs = pack_sparse_ternary(sparse, mask)
 
     # Reference path (from generate_sparse_mask.py)

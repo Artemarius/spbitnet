@@ -75,6 +75,11 @@ struct TransformerLayer {
     // RMSNorm weights (GPU, float32)
     float* d_input_layernorm         = nullptr;  ///< (hidden_size,)
     float* d_post_attention_layernorm = nullptr;  ///< (hidden_size,)
+
+    // Sub-normalization (SubLN) weights (GPU, float32)
+    // Applied after attention o_proj and MLP down_proj, before residual add.
+    float* d_attn_sub_norm           = nullptr;  ///< (hidden_size,)
+    float* d_ffn_sub_norm            = nullptr;  ///< (intermediate_size for gate/up, hidden_size for down output)
 };
 
 // ---------------------------------------------------------------------------

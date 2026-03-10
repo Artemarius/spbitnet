@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -14,10 +15,11 @@
 static void print_usage(const char* argv0) {
     printf("Usage: %s [OPTIONS]\n", argv0);
     printf("\nOptions:\n");
-    printf("  --model <dir>    Load model from directory (convert_model.py output)\n");
-    printf("  --prompt <text>  Prompt text for generation (default: \"Hello\")\n");
-    printf("  --max-tokens <n> Maximum tokens to generate (default: 32)\n");
-    printf("  --help           Show this help\n");
+    printf("  --model <dir>       Load model from directory (convert_model.py output)\n");
+    printf("  --prompt <text>     Prompt text for generation (default: \"Hello\")\n");
+    printf("  --max-tokens <n>    Maximum tokens to generate (default: 32)\n");
+    printf("  --dump-tokens <f>   Dump generated token IDs to JSON file\n");
+    printf("  --help              Show this help\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -27,6 +29,7 @@ int main(int argc, char* argv[]) {
     // Parse args
     std::string model_dir;
     std::string prompt = "Hello";
+    std::string dump_tokens_path;
     int max_tokens = 32;
 
     for (int i = 1; i < argc; ++i) {
@@ -36,6 +39,8 @@ int main(int argc, char* argv[]) {
             prompt = argv[++i];
         } else if (std::strcmp(argv[i], "--max-tokens") == 0 && i + 1 < argc) {
             max_tokens = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--dump-tokens") == 0 && i + 1 < argc) {
+            dump_tokens_path = argv[++i];
         } else if (std::strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -140,6 +145,34 @@ int main(int argc, char* argv[]) {
         printf("\n--- %d tokens generated ---\n",
                static_cast<int>(generated.size()));
         spbitnet::print_vram_usage("after generation");
+
+        // Dump tokens as JSON for validation against PyTorch reference
+        if (!dump_tokens_path.empty()) {
+            std::ofstream ofs(dump_tokens_path);
+            if (!ofs)
+                throw std::runtime_error("Cannot open " + dump_tokens_path);
+
+            ofs << "{\n";
+            ofs << "  \"prompt\": \"" << prompt << "\",\n";
+
+            ofs << "  \"prompt_ids\": [";
+            for (size_t i = 0; i < prompt_ids.size(); ++i)
+                ofs << (i ? ", " : "") << prompt_ids[i];
+            ofs << "],\n";
+
+            ofs << "  \"input_ids\": [";
+            for (size_t i = 0; i < input_ids.size(); ++i)
+                ofs << (i ? ", " : "") << input_ids[i];
+            ofs << "],\n";
+
+            ofs << "  \"generated_ids\": [";
+            for (size_t i = 0; i < generated.size(); ++i)
+                ofs << (i ? ", " : "") << generated[i];
+            ofs << "]\n";
+
+            ofs << "}\n";
+            printf("Token IDs saved to %s\n", dump_tokens_path.c_str());
+        }
 
     } catch (const std::runtime_error& e) {
         fprintf(stderr, "Error: %s\n", e.what());

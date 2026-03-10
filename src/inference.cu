@@ -190,6 +190,11 @@ const float* InferenceEngine::forward(int token_id) {
         // ----- Output projection -----
         bitlinear(d_x_, H, layer.o_proj, d_q_);  // d_q_ as temp
 
+        // SubLN: attention sub-normalization (before residual add)
+        if (layer.d_attn_sub_norm) {
+            rms_norm_gpu(d_q_, layer.d_attn_sub_norm, d_q_, H, cfg_.rms_norm_eps);
+        }
+
         // Residual add
         residual_add_gpu(d_q_, d_residual_, d_x_, H);
 
@@ -205,8 +210,19 @@ const float* InferenceEngine::forward(int token_id) {
         bitlinear(d_x_, H, layer.gate_proj, d_gate_);  // → (inter)
         bitlinear(d_x_, H, layer.up_proj,   d_up_);    // → (inter)
 
-        // ReLU²(gate) * up → d_gate_ (in-place output is safe)
-        relu2_mul_gpu(d_gate_, d_up_, d_gate_, inter);
+        // ReLU²(gate) * up → float32 buffer (avoids float16 overflow).
+        // relu²(x) can produce values >> 65504 before sub-norm normalizes them.
+        // Safe to reuse d_int_out_ here — it's only used inside bitlinear().
+        float* d_mlp_f32 = reinterpret_cast<float*>(d_int_out_);
+        relu2_mul_f32_gpu(d_gate_, d_up_, d_mlp_f32, inter);
+
+        // SubLN: FFN sub-normalization (float32 input → float16 output)
+        if (layer.d_ffn_sub_norm) {
+            rms_norm_f32in_gpu(d_mlp_f32, layer.d_ffn_sub_norm, d_gate_,
+                               inter, cfg_.rms_norm_eps);
+        } else {
+            float_to_half_gpu(d_mlp_f32, d_gate_, inter);
+        }
 
         // Down projection
         bitlinear(d_gate_, inter, layer.down_proj, d_q_);  // → (H)
