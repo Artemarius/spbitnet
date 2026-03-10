@@ -103,15 +103,38 @@ Sparse ternary GEMV using warp-per-row parallelism with `__shfl_down_sync` reduc
 
 The sparse ternary kernel is **~13x faster** than naive dense ternary and **matches or beats cuBLAS INT8** at all tested dimensions — while using zero multiplications and reading 5.3x less memory.
 
+### Phase 4: cuSPARSELt Sparse Tensor Core Comparison
+
+**Key finding: cuSPARSELt INT8 SpMMA requires n >= 16.** It cannot do GEMV (n=1) at all — for autoregressive inference at batch size 1, our custom sparse ternary kernel is the only option.
+
+#### GEMM (n=16) — cuSPARSELt vs cuBLAS dense, both using Tensor Cores
+
+| Dimension | cuBLAS INT8 (us) | cuSPARSELt (us) | Speedup |
+|-----------|-----------------|-----------------|---------|
+| 2048x2048 (attn proj) | 60.4 | 14.3 | 4.21x |
+| 5632x2048 (FFN up) | 147.5 | 32.8 | 4.50x |
+| 2048x5632 (FFN down) | 142.3 | 42.0 | 3.39x |
+| 2560x2560 (attn proj) | 89.1 | 24.6 | 3.62x |
+| 6912x2560 (FFN up) | 220.2 | 44.2 | 4.98x |
+| 2560x6912 (FFN down) | 205.8 | 50.2 | 4.10x |
+| 4096x4096 (large square) | 197.6 | 44.0 | 4.49x |
+| 8192x2560 (wide FFN) | 260.1 | 60.4 | 4.31x |
+
+cuSPARSELt's Sparse Tensor Cores give **3.4-5.0x speedup** over cuBLAS at batch size 16. At n=32, the advantage drops to 1.1-1.8x as compute begins to dominate over memory bandwidth.
+
+#### Summary: Kernel Selection Strategy
+
+| Scenario | Best Kernel | Why |
+|----------|------------|-----|
+| GEMV (n=1, autoregressive) | **Custom sparse ternary** | cuSPARSELt can't do n=1; our kernel beats cuBLAS |
+| Batched GEMM (n=16+) | **cuSPARSELt** | Sparse Tensor Cores give 3-5x over dense cuBLAS |
+
 ### Future Benchmarks
 
-| Kernel | Sparse Custom | Sparse cuSPARSELt | Speedup |
-|--------|---------------|-------------------|---------|
-| Linear 2560x6912 (GEMV) | 91.1 us | — | — |
-| Linear 2560x6912 (GEMM, bs=8) | — | — | — |
-| End-to-end (2B model) | — tok/s | — tok/s | — |
-
-*cuSPARSELt comparison to be populated in Phase 4.*
+| Benchmark | Status |
+|-----------|--------|
+| End-to-end tok/s (2B model) | Phase 5 |
+| Nsight Compute profiling | Phase 6 |
 
 ## Build
 
@@ -121,7 +144,7 @@ The sparse ternary kernel is **~13x faster** than naive dense ternary and **matc
 - CUDA Toolkit 12.x
 - CMake 3.24+
 - NVIDIA GPU with Compute Capability 8.0+ (Ampere or later)
-- cuSPARSELt library (for baseline comparison)
+- cuSPARSELt library (`sudo apt install libcusparselt0-dev-cuda-12`, optional)
 - Python 3.9+ (for model conversion scripts)
 
 ### Build Instructions
@@ -162,7 +185,7 @@ spbitnet/
 │   ├── ternary_kernels.h             # Dense ternary CUDA kernel wrappers (unpack, GEMV)
 │   ├── sparse_ternary_tensor.h       # CPU-side compressed sparse-ternary storage (2:4)
 │   ├── sparse_ternary_kernels.h      # Sparse ternary CUDA kernel wrappers (unpack, GEMV)
-│   ├── cusparselt_backend.h          # cuSPARSELt wrapper (planned)
+│   ├── cusparselt_backend.h          # cuSPARSELt RAII wrapper (2:4 sparse INT8 SpMMA)
 │   ├── model.h                       # BitNet transformer model (planned)
 │   └── generate.h                    # Text generation loop (planned)
 ├── src/
@@ -173,16 +196,17 @@ spbitnet/
 │   │   ├── rope.cu                   # Rotary positional embeddings (planned)
 │   │   ├── softmax.cu                # Numerically stable softmax (planned)
 │   │   └── activation.cu             # ReLU², SiLU activations (planned)
-│   ├── cusparselt_backend.cpp        # (planned)
+│   ├── cusparselt_backend.cu         # cuSPARSELt prune/compress/SpMMA implementation
 │   └── main.cpp
 ├── python/
 │   └── generate_sparse_mask.py       # 2:4 mask generation + binary export
 ├── tests/
 │   ├── test_ternary_pack.cu          # Dense: pack/unpack roundtrip, GPU unpack, GEMV
 │   ├── test_sparse_ternary.cu        # Sparse: pack/unpack, pruning, GPU unpack, GEMV
+│   ├── test_cusparselt.cu            # cuSPARSELt: pruning, GEMM correctness
 │   └── test_model.cpp                # End-to-end model validation (planned)
 ├── benchmarks/
-│   └── bench_kernels.cu              # Dense vs sparse ternary vs cuBLAS INT8 benchmark
+│   └── bench_kernels.cu              # GEMV + GEMM benchmarks (all kernel variants)
 ├── docs/                             # (planned)
 │   ├── kernel_design.md
 │   ├── compression_format.md
