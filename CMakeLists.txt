@@ -15,6 +15,17 @@ endif()
 # ---- Include paths ----
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
+# ---- FetchContent (shared by json, googletest) ----
+include(FetchContent)
+
+# ---- nlohmann/json (header-only, for model config parsing) ----
+FetchContent_Declare(
+    json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+)
+FetchContent_MakeAvailable(json)
+
 # ---- cuSPARSELt (optional) ----
 option(SPBITNET_USE_CUSPARSELT "Enable cuSPARSELt backend" ON)
 
@@ -60,15 +71,21 @@ if(SPBITNET_USE_CUSPARSELT)
     target_link_libraries(spbitnet_kernels PUBLIC ${CUSPARSELT_LIBRARY} cusparse)
 endif()
 
+# ---- Model loader library ----
+add_library(spbitnet_model STATIC
+    src/model.cu
+)
+target_include_directories(spbitnet_model PUBLIC ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(spbitnet_model PUBLIC spbitnet_kernels nlohmann_json::nlohmann_json)
+
 # ---- Main inference binary ----
 add_executable(spbitnet_infer
     src/main.cpp
 )
 target_include_directories(spbitnet_infer PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_link_libraries(spbitnet_infer PRIVATE
-    spbitnet_kernels
+    spbitnet_model
 )
-# cuSPARSELt already linked via spbitnet_kernels
 
 # ---- Benchmark binary ----
 add_executable(spbitnet_bench
@@ -77,7 +94,6 @@ add_executable(spbitnet_bench
 target_link_libraries(spbitnet_bench PRIVATE spbitnet_kernels cublas)
 
 # ---- Google Test ----
-include(FetchContent)
 FetchContent_Declare(
     googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
@@ -99,6 +115,12 @@ add_executable(spbitnet_sparse_tests
 )
 target_link_libraries(spbitnet_sparse_tests PRIVATE gtest_main spbitnet_kernels)
 add_test(NAME spbitnet_sparse_tests COMMAND spbitnet_sparse_tests)
+
+add_executable(spbitnet_model_tests
+    tests/test_model_loader.cu
+)
+target_link_libraries(spbitnet_model_tests PRIVATE gtest_main spbitnet_model)
+add_test(NAME spbitnet_model_tests COMMAND spbitnet_model_tests)
 
 if(SPBITNET_USE_CUSPARSELT)
     add_executable(spbitnet_cusparselt_tests

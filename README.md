@@ -42,7 +42,7 @@ spbitnet exploits the fact that ternary weights {-1, 0, +1} combined with 2:4 sp
 │  GPU Allocator │ KV-Cache │ Compressed Weights      │
 ├─────────────────────────────────────────────────────┤
 │            Model I/O                                │
-│  GGUF/SafeTensors │ Sparsity Mask │ Tokenizer       │
+│  SafeTensors → spbitnet │ Sparsity Mask │ Tokenizer │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -145,7 +145,8 @@ cuSPARSELt's Sparse Tensor Cores give **3.4-5.0x speedup** over cuBLAS at batch 
 - CMake 3.24+
 - NVIDIA GPU with Compute Capability 8.0+ (Ampere or later)
 - cuSPARSELt library (`sudo apt install libcusparselt0-dev-cuda-12`, optional)
-- Python 3.9+ (for model conversion scripts)
+- Python 3.9+ with torch, transformers, safetensors (for model conversion only)
+- nlohmann/json (fetched automatically by CMake)
 
 ### Build Instructions
 
@@ -160,14 +161,19 @@ cmake --build build -j$(nproc)
 ### Quick Start
 
 ```bash
-# Download and convert a BitNet model
-python scripts/download_model.py --model microsoft/BitNet-b1.58-2B-4T --output models/
+# Install Python dependencies (for model conversion only)
+pip install -r python/requirements.txt
 
-# Apply 2:4 sparsity mask and compress weights
-python scripts/apply_sparsity.py --model models/bitnet-2b-4t/ --output models/bitnet-2b-4t-sparse/
+# Convert a BitNet model (downloads bf16 weights, applies 2:4 sparsity, packs)
+python python/convert_model.py \
+    --model microsoft/bitnet-b1.58-2B-4T-bf16 \
+    --output models/bitnet-2b-4t-sparse/
 
-# Run inference
-./build/spbitnet_infer --model models/bitnet-2b-4t-sparse/ --prompt "The future of AI is" --max-tokens 128
+# Inspect model structure without converting
+python python/convert_model.py --model microsoft/bitnet-b1.58-2B-4T-bf16 --dry-run
+
+# Run inference (Phase 5 — in progress)
+./build/spbitnet_infer --model models/bitnet-2b-4t-sparse/ --prompt "Hello" --max-tokens 32
 
 # Run kernel benchmarks
 ./build/spbitnet_bench
@@ -186,7 +192,7 @@ spbitnet/
 │   ├── sparse_ternary_tensor.h       # CPU-side compressed sparse-ternary storage (2:4)
 │   ├── sparse_ternary_kernels.h      # Sparse ternary CUDA kernel wrappers (unpack, GEMV)
 │   ├── cusparselt_backend.h          # cuSPARSELt RAII wrapper (2:4 sparse INT8 SpMMA)
-│   ├── model.h                       # BitNet transformer model (planned)
+│   ├── model.h                       # Model loader (config, weights, GPU upload)
 │   └── generate.h                    # Text generation loop (planned)
 ├── src/
 │   ├── kernels/
@@ -197,14 +203,17 @@ spbitnet/
 │   │   ├── softmax.cu                # Numerically stable softmax (planned)
 │   │   └── activation.cu             # ReLU², SiLU activations (planned)
 │   ├── cusparselt_backend.cu         # cuSPARSELt prune/compress/SpMMA implementation
-│   └── main.cpp
+│   ├── model.cu                      # Model loading: JSON parsing, binary I/O, GPU upload
+│   └── main.cpp                      # CLI entry point (--model, --prompt, --max-tokens)
 ├── python/
-│   └── generate_sparse_mask.py       # 2:4 mask generation + binary export
+│   ├── convert_model.py              # HuggingFace → spbitnet format (2:4 sparsity + pack)
+│   ├── generate_sparse_mask.py       # 2:4 mask generation + binary export (standalone)
+│   └── requirements.txt              # Python dependencies (torch, transformers, etc.)
 ├── tests/
 │   ├── test_ternary_pack.cu          # Dense: pack/unpack roundtrip, GPU unpack, GEMV
 │   ├── test_sparse_ternary.cu        # Sparse: pack/unpack, pruning, GPU unpack, GEMV
 │   ├── test_cusparselt.cu            # cuSPARSELt: pruning, GEMM correctness
-│   └── test_model.cpp                # End-to-end model validation (planned)
+│   └── test_model_loader.cu          # Model loader: synthetic model → GPU load
 ├── benchmarks/
 │   └── bench_kernels.cu              # GEMV + GEMM benchmarks (all kernel variants)
 ├── docs/                             # (planned)
