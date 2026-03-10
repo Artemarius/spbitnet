@@ -1,0 +1,52 @@
+# Build
+build/
+cmake-build-*/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.exe
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.vs/
+
+# CUDA
+*.cubin
+*.ptx
+*.fatbin
+
+# Models (large binary files)
+models/
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Private files
+PROJECT.md
+claude-code-setup-prompt.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Profiling
+*.ncu-rep
+*.nsys-rep
+*.qdrep
