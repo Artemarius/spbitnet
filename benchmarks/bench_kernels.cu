@@ -1,6 +1,8 @@
 #include "spbitnet/cuda_utils.h"
 #include "spbitnet/ternary_tensor.h"
 #include "spbitnet/ternary_kernels.h"
+#include "spbitnet/sparse_ternary_tensor.h"
+#include "spbitnet/sparse_ternary_kernels.h"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -108,6 +110,25 @@ void cublas_int8_gemv(const CublasGemvContext& ctx) {
 }
 
 // ---------------------------------------------------------------------------
+// CPU reference sparse GEMV for correctness check
+// ---------------------------------------------------------------------------
+static void cpu_sparse_gemv_ref(const spbitnet::SparseTernaryTensor& tensor,
+                                const int8_t* x, int32_t* y) {
+    const int rows = tensor.rows();
+    const int cols = tensor.cols();
+    std::vector<int8_t> dense(static_cast<size_t>(rows) * cols);
+    tensor.unpack_to_int8(dense.data());
+    for (int r = 0; r < rows; ++r) {
+        int32_t sum = 0;
+        for (int c = 0; c < cols; ++c) {
+            sum += static_cast<int32_t>(dense[r * cols + c]) *
+                   static_cast<int32_t>(x[c]);
+        }
+        y[r] = sum;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Benchmark dimensions: representative of BitNet model layers
 // ---------------------------------------------------------------------------
 
@@ -140,8 +161,8 @@ static constexpr int NUM_DIMS = sizeof(bench_dims) / sizeof(bench_dims[0]);
 // ---------------------------------------------------------------------------
 
 int main() {
-    printf("spbitnet — Dense Ternary GEMV vs cuBLAS INT8 GEMV Benchmark\n");
-    printf("=============================================================\n\n");
+    printf("spbitnet — Dense Ternary / Sparse Ternary GEMV vs cuBLAS INT8 Benchmark\n");
+    printf("========================================================================\n\n");
 
     spbitnet::print_device_info();
     spbitnet::print_vram_usage("pre-benchmark");
@@ -161,11 +182,11 @@ int main() {
     std::mt19937 rng(42);
 
     // Table header
-    printf("%-24s  %12s  %12s  %12s  %10s\n",
-           "Dimension", "Ternary(us)", "cuBLAS(us)", "Speedup", "BW Ratio");
-    printf("%-24s  %12s  %12s  %12s  %10s\n",
+    printf("%-24s  %12s  %12s  %12s  %12s  %10s\n",
+           "Dimension", "Ternary(us)", "Sparse(us)", "cuBLAS(us)", "Speedup(S)", "BW Ratio");
+    printf("%-24s  %12s  %12s  %12s  %12s  %10s\n",
            "------------------------", "------------", "------------",
-           "------------", "----------");
+           "------------", "------------", "----------");
 
     for (int d = 0; d < NUM_DIMS; ++d) {
         const int rows = bench_dims[d].rows;
@@ -173,7 +194,7 @@ int main() {
         const char* label = bench_dims[d].label;
 
         // Generate random ternary weights {-1, 0, +1}
-        std::vector<int8_t> h_weights(rows * cols);
+        std::vector<int8_t> h_weights(static_cast<size_t>(rows) * cols);
         std::uniform_int_distribution<int> dist(-1, 1);
         for (auto& w : h_weights) w = static_cast<int8_t>(dist(rng));
 
@@ -182,7 +203,7 @@ int main() {
         std::uniform_int_distribution<int> xdist(-5, 5);
         for (auto& v : h_x) v = static_cast<int8_t>(xdist(rng));
 
-        // --- Ternary GEMV setup ---
+        // --- Dense Ternary GEMV setup ---
         auto tensor = spbitnet::TernaryTensor::pack_from_int8(h_weights.data(), rows, cols);
 
         uint32_t* d_packed = nullptr;
@@ -196,6 +217,38 @@ int main() {
 
         CUDA_CHECK(cudaMemcpy(d_packed, tensor.packed_data(), packed_bytes, cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_x_tern, h_x.data(), cols * sizeof(int8_t), cudaMemcpyHostToDevice));
+
+        // --- Sparse Ternary GEMV setup ---
+        // Create a 2:4 mask: for each group of 4, randomly pick 2 positions to keep
+        std::vector<uint8_t> sparse_mask(static_cast<size_t>(rows) * cols, 0);
+        for (size_t i = 0; i < static_cast<size_t>(rows) * cols; i += 4) {
+            int idx[4] = {0, 1, 2, 3};
+            std::shuffle(idx, idx + 4, rng);
+            sparse_mask[i + idx[0]] = 1;
+            sparse_mask[i + idx[1]] = 1;
+        }
+
+        auto sparse_tensor = spbitnet::SparseTernaryTensor::pack_from_dense(
+            h_weights.data(), sparse_mask.data(), rows, cols);
+
+        const int meta_stride = static_cast<int>(sparse_tensor.meta_row_stride());
+        const int vals_stride = static_cast<int>(sparse_tensor.values_row_stride());
+        const size_t meta_bytes = sparse_tensor.meta_size() * sizeof(uint32_t);
+        const size_t vals_bytes = sparse_tensor.values_size() * sizeof(uint32_t);
+
+        uint32_t* d_meta    = nullptr;
+        uint32_t* d_values  = nullptr;
+        int8_t*   d_x_sp    = nullptr;
+        int32_t*  d_y_sp    = nullptr;
+
+        CUDA_CHECK(cudaMalloc(&d_meta, meta_bytes));
+        CUDA_CHECK(cudaMalloc(&d_values, vals_bytes));
+        CUDA_CHECK(cudaMalloc(&d_x_sp, cols * sizeof(int8_t)));
+        CUDA_CHECK(cudaMalloc(&d_y_sp, rows * sizeof(int32_t)));
+
+        CUDA_CHECK(cudaMemcpy(d_meta, sparse_tensor.meta_data(), meta_bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_values, sparse_tensor.values_data(), vals_bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_x_sp, h_x.data(), cols * sizeof(int8_t), cudaMemcpyHostToDevice));
 
         // --- cuBLAS INT8 GEMV setup ---
         int8_t*  d_A_cublas = nullptr;
@@ -219,7 +272,7 @@ int main() {
         ctx.rows   = rows;
         ctx.cols   = cols;
 
-        // --- Correctness check: verify both produce same result ---
+        // --- Correctness check: dense ternary vs cuBLAS ---
         CUDA_CHECK(cudaMemset(d_y_tern, 0, rows * sizeof(int32_t)));
         spbitnet::ternary_gemv_gpu(d_packed, d_x_tern, d_y_tern, rows, cols);
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -231,12 +284,35 @@ int main() {
         CUDA_CHECK(cudaMemcpy(y_tern.data(), d_y_tern, rows * sizeof(int32_t), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(y_cublas.data(), d_y_cublas, rows * sizeof(int32_t), cudaMemcpyDeviceToHost));
 
-        int mismatches = 0;
+        int mismatches_dense = 0;
         for (int i = 0; i < rows; ++i) {
-            if (y_tern[i] != y_cublas[i]) ++mismatches;
+            if (y_tern[i] != y_cublas[i]) ++mismatches_dense;
         }
-        if (mismatches > 0) {
-            printf("WARNING: %s — %d/%d mismatches!\n", label, mismatches, rows);
+        if (mismatches_dense > 0) {
+            printf("WARNING: %s — dense ternary vs cuBLAS: %d/%d mismatches!\n",
+                   label, mismatches_dense, rows);
+        }
+
+        // --- Correctness check: sparse ternary GEMV vs CPU reference ---
+        CUDA_CHECK(cudaMemset(d_y_sp, 0, rows * sizeof(int32_t)));
+        spbitnet::sparse_ternary_gemv_gpu(d_meta, d_values, d_x_sp, d_y_sp,
+                                           rows, cols, meta_stride, vals_stride);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        std::vector<int32_t> cpu_sparse_y(rows);
+        cpu_sparse_gemv_ref(sparse_tensor, h_x.data(), cpu_sparse_y.data());
+
+        std::vector<int32_t> gpu_sparse_y(rows);
+        CUDA_CHECK(cudaMemcpy(gpu_sparse_y.data(), d_y_sp,
+                              rows * sizeof(int32_t), cudaMemcpyDeviceToHost));
+
+        int mismatches_sparse = 0;
+        for (int i = 0; i < rows; ++i) {
+            if (gpu_sparse_y[i] != cpu_sparse_y[i]) ++mismatches_sparse;
+        }
+        if (mismatches_sparse > 0) {
+            printf("WARNING: %s — sparse ternary GPU vs CPU: %d/%d mismatches!\n",
+                   label, mismatches_sparse, rows);
         }
 
         // --- Benchmark ---
@@ -244,29 +320,40 @@ int main() {
             spbitnet::ternary_gemv_gpu(d_packed, d_x_tern, d_y_tern, rows, cols);
         }, WARMUP, ITERS);
 
+        BenchResult sparse_result = bench_gpu([&]() {
+            spbitnet::sparse_ternary_gemv_gpu(d_meta, d_values, d_x_sp, d_y_sp,
+                                               rows, cols, meta_stride, vals_stride);
+        }, WARMUP, ITERS);
+
         BenchResult cublas_result = bench_gpu([&]() {
             cublas_int8_gemv(ctx);
         }, WARMUP, ITERS);
 
-        // Memory bandwidth: ternary reads packed_bytes + cols*1 + writes rows*4
+        // Memory bandwidth ratios:
+        // Sparse reads meta_bytes + vals_bytes + cols*1 + writes rows*4
         // cuBLAS reads rows*cols*1 + cols*1 + writes rows*4
-        double tern_bytes   = static_cast<double>(packed_bytes) + cols + rows * 4;
-        double cublas_bytes  = static_cast<double>(rows) * cols + cols + rows * 4;
-        double bw_ratio = cublas_bytes / tern_bytes;
+        double sparse_bytes = static_cast<double>(meta_bytes + vals_bytes) + cols + rows * 4;
+        double cublas_bytes = static_cast<double>(rows) * cols + cols + rows * 4;
+        double bw_ratio = cublas_bytes / sparse_bytes;
 
-        float speedup = cublas_result.median_us / tern_result.median_us;
+        float speedup_sparse = cublas_result.median_us / sparse_result.median_us;
 
-        printf("%-24s  %9.1f     %9.1f     %9.2fx     %7.1fx\n",
+        printf("%-24s  %9.1f     %9.1f     %9.1f     %9.2fx     %7.1fx\n",
                label,
                tern_result.median_us,
+               sparse_result.median_us,
                cublas_result.median_us,
-               speedup,
+               speedup_sparse,
                bw_ratio);
 
         // Cleanup
         CUDA_CHECK(cudaFree(d_packed));
         CUDA_CHECK(cudaFree(d_x_tern));
         CUDA_CHECK(cudaFree(d_y_tern));
+        CUDA_CHECK(cudaFree(d_meta));
+        CUDA_CHECK(cudaFree(d_values));
+        CUDA_CHECK(cudaFree(d_x_sp));
+        CUDA_CHECK(cudaFree(d_y_sp));
         CUDA_CHECK(cudaFree(d_A_cublas));
         CUDA_CHECK(cudaFree(d_x_cublas));
         CUDA_CHECK(cudaFree(d_y_cublas));
@@ -275,9 +362,10 @@ int main() {
     printf("\n");
     printf("Legend:\n");
     printf("  Ternary(us)  — Our dense ternary GEMV (2-bit packed, add/sub only)\n");
+    printf("  Sparse(us)   — Our sparse ternary GEMV (2:4 sparsity, 1.5 bits/weight)\n");
     printf("  cuBLAS(us)   — cuBLAS INT8 GEMM with n=1 (full INT8 weights, Tensor Cores)\n");
-    printf("  Speedup      — cuBLAS / Ternary (>1 means ternary is faster)\n");
-    printf("  BW Ratio     — Memory read ratio: cuBLAS bytes / ternary bytes (~4x expected)\n");
+    printf("  Speedup(S)   — cuBLAS / Sparse (>1 means sparse ternary is faster)\n");
+    printf("  BW Ratio     — Memory read ratio: cuBLAS bytes / sparse bytes\n");
     printf("\n");
 
     spbitnet::print_vram_usage("post-benchmark");

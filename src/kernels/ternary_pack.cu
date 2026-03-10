@@ -32,14 +32,11 @@ __global__ void ternary_unpack_kernel(const uint32_t* __restrict__ packed,
 
         const uint32_t code = (word >> (i * 2)) & 0x3;
 
-        // Decode: 01 -> +1, 10 -> -1, else -> 0
-        int8_t val = 0;
-        if (code == 0x1) {
-            val = 1;
-        } else if (code == 0x2) {
-            val = -1;
-        }
-        out[idx] = val;
+        // Branchless decode: 01 -> +1, 10 -> -1, 00/11 -> 0
+        // (code & 1) is 1 for code=01, 0 otherwise
+        // (code >> 1) is 1 for code=10, 0 otherwise
+        // Result: (code & 1) - (code >> 1)
+        out[idx] = static_cast<int8_t>((code & 1) - (code >> 1));
     }
 }
 
@@ -71,12 +68,11 @@ __global__ void ternary_gemv_kernel(const uint32_t* __restrict__ packed_weights,
 
             const uint32_t code = (word >> (i * 2)) & 0x3;
 
-            // Decode: 01 -> +1, 10 -> -1, else -> skip
-            if (code == 0x1) {
-                acc += static_cast<int32_t>(x[col]);
-            } else if (code == 0x2) {
-                acc -= static_cast<int32_t>(x[col]);
-            }
+            // Branchless decode + accumulate:
+            // sign = (code & 1) - (code >> 1) gives +1, -1, or 0
+            const int32_t sign = static_cast<int32_t>(code & 1) -
+                                 static_cast<int32_t>(code >> 1);
+            acc += sign * static_cast<int32_t>(x[col]);
             ++col;
         }
     }

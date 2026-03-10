@@ -38,6 +38,7 @@ endif()
 # ---- CUDA kernel library ----
 add_library(spbitnet_kernels STATIC
     src/kernels/ternary_pack.cu
+    src/kernels/sparse_ternary.cu
 )
 target_include_directories(spbitnet_kernels PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(spbitnet_kernels PUBLIC cudart)
@@ -77,3 +78,9 @@ add_executable(spbitnet_tests
 )
 target_link_libraries(spbitnet_tests PRIVATE gtest_main spbitnet_kernels)
 add_test(NAME spbitnet_tests COMMAND spbitnet_tests)
+
+add_executable(spbitnet_sparse_tests
+    tests/test_sparse_ternary.cu
+)
+target_link_libraries(spbitnet_sparse_tests PRIVATE gtest_main spbitnet_kernels)
+add_test(NAME spbitnet_sparse_tests COMMAND spbitnet_sparse_tests)
