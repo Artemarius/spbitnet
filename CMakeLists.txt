@@ -35,12 +35,19 @@ else()
     set(SPBITNET_USE_CUSPARSELT OFF)
 endif()
 
+# ---- CUDA kernel library ----
+add_library(spbitnet_kernels STATIC
+    src/kernels/ternary_pack.cu
+)
+target_include_directories(spbitnet_kernels PUBLIC ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(spbitnet_kernels PUBLIC cudart)
+
 # ---- Main inference binary ----
 add_executable(spbitnet_infer
     src/main.cpp
 )
 target_link_libraries(spbitnet_infer PRIVATE
-    cudart
+    spbitnet_kernels
 )
 if(SPBITNET_USE_CUSPARSELT)
     target_link_libraries(spbitnet_infer PRIVATE cusparseLt cusparse)
@@ -63,9 +70,8 @@ FetchContent_MakeAvailable(googletest)
 
 enable_testing()
 
-# Placeholder test target — uncomment as tests are added
-# add_executable(spbitnet_tests
-#     tests/test_ternary_pack.cu
-# )
-# target_link_libraries(spbitnet_tests PRIVATE gtest_main cudart)
-# add_test(NAME spbitnet_tests COMMAND spbitnet_tests)
+add_executable(spbitnet_tests
+    tests/test_ternary_pack.cu
+)
+target_link_libraries(spbitnet_tests PRIVATE gtest_main spbitnet_kernels)
+add_test(NAME spbitnet_tests COMMAND spbitnet_tests)

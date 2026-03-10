@@ -121,55 +121,46 @@ spbitnet/
 ├── README.md
 ├── include/spbitnet/
 │   ├── cuda_utils.h              # CUDA error handling, device info
-│   ├── ternary_tensor.h          # Compressed ternary weight representation
-│   ├── sparse_mask.h             # 2:4 sparsity mask generation and storage
-│   ├── kernels.h                 # CUDA kernel declarations
-│   ├── cusparselt_backend.h      # cuSPARSELt wrapper for HW baseline
-│   ├── model.h                   # BitNet transformer model definition
-│   ├── kv_cache.h                # KV-cache for autoregressive generation
-│   ├── tokenizer.h               # BPE tokenizer
-│   └── generate.h                # Text generation loop
+│   ├── ternary_tensor.h          # CPU-side 2-bit packed ternary weight storage
+│   ├── ternary_kernels.h         # CUDA kernel launch wrappers (unpack, GEMV)
+│   ├── sparse_mask.h             # 2:4 sparsity mask generation (planned)
+│   ├── cusparselt_backend.h      # cuSPARSELt wrapper (planned)
+│   ├── model.h                   # BitNet transformer model (planned)
+│   ├── kv_cache.h                # KV-cache (planned)
+│   ├── tokenizer.h               # BPE tokenizer (planned)
+│   └── generate.h                # Text generation loop (planned)
 ├── src/
 │   ├── kernels/
-│   │   ├── sparse_ternary_gemv.cu    # Sparse ternary matrix-vector product
-│   │   ├── sparse_ternary_gemm.cu    # Sparse ternary matrix-matrix product
-│   │   ├── ternary_pack.cu           # Weight packing/compression
-│   │   ├── sparsity_mask.cu          # 2:4 mask computation on GPU
-│   │   ├── rmsnorm.cu                # RMS normalization
-│   │   ├── rope.cu                   # Rotary positional embeddings
-│   │   ├── softmax.cu                # Numerically stable softmax
-│   │   └── activation.cu             # ReLU², SiLU activations
-│   ├── cusparselt_backend.cpp
-│   ├── ternary_tensor.cpp
-│   ├── model.cpp
-│   ├── kv_cache.cpp
-│   ├── tokenizer.cpp
-│   ├── generate.cpp
+│   │   ├── ternary_pack.cu           # Unpack + dense ternary GEMV kernels
+│   │   ├── sparse_ternary_gemv.cu    # Sparse ternary GEMV (planned)
+│   │   ├── sparse_ternary_gemm.cu    # Sparse ternary GEMM (planned)
+│   │   ├── sparsity_mask.cu          # 2:4 mask computation (planned)
+│   │   ├── rmsnorm.cu                # RMS normalization (planned)
+│   │   ├── rope.cu                   # Rotary positional embeddings (planned)
+│   │   ├── softmax.cu                # Numerically stable softmax (planned)
+│   │   └── activation.cu             # ReLU², SiLU activations (planned)
+│   ├── cusparselt_backend.cpp        # (planned)
 │   └── main.cpp
-├── python/
-│   ├── download_model.py         # Fetch BitNet models from HuggingFace
-│   ├── apply_sparsity.py         # Apply 2:4 mask, export compressed weights
-│   ├── validate_sparsity.py      # Verify sparsity patterns and compression
-│   └── baseline_pytorch.py       # PyTorch baseline for correctness checks
-├── tests/
-│   ├── test_ternary_pack.cu      # Packing/unpacking correctness
-│   ├── test_sparse_gemv.cu       # Sparse GEMV vs dense reference
-│   ├── test_sparse_gemm.cu       # Sparse GEMM vs cuBLAS reference
-│   ├── test_sparsity_mask.cu     # Mask generation correctness
-│   └── test_model.cpp            # End-to-end model output validation
-├── benchmarks/
-│   ├── bench_kernels.cu          # Kernel-level performance sweep
-│   ├── bench_cusparselt.cu       # cuSPARSELt baseline measurements
-│   ├── bench_memory.cu           # Memory bandwidth analysis
-│   └── bench_e2e.cpp             # End-to-end inference throughput
-├── scripts/
+├── python/                           # (planned)
 │   ├── download_model.py
 │   ├── apply_sparsity.py
-│   └── plot_benchmarks.py        # Generate benchmark charts
-├── docs/
-│   ├── kernel_design.md          # Kernel design decisions and tradeoffs
-│   ├── compression_format.md     # Weight compression format specification
-│   └── benchmarks.md             # Detailed benchmark methodology
+│   ├── validate_sparsity.py
+│   └── baseline_pytorch.py
+├── tests/
+│   ├── test_ternary_pack.cu      # Pack/unpack roundtrip, GPU unpack, GEMV correctness
+│   ├── test_sparse_gemv.cu       # Sparse GEMV vs dense reference (planned)
+│   └── test_model.cpp            # End-to-end model validation (planned)
+├── benchmarks/                       # (planned)
+│   ├── bench_kernels.cu
+│   ├── bench_cusparselt.cu
+│   ├── bench_memory.cu
+│   └── bench_e2e.cpp
+├── scripts/                          # (planned)
+│   └── plot_benchmarks.py
+├── docs/                             # (planned)
+│   ├── kernel_design.md
+│   ├── compression_format.md
+│   └── benchmarks.md
 └── models/                       # Downloaded/converted models (gitignored)
 ```
 
