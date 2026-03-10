@@ -4,6 +4,7 @@
 /// \brief Transformer inference engine for sparse ternary BitNet models.
 
 #include "spbitnet/model.h"
+#include "spbitnet/profiler.h"
 
 #include <cuda_fp16.h>
 #include <vector>
@@ -36,6 +37,9 @@ public:
 
     int seq_len() const { return seq_len_; }
 
+    /// Access the profiler to enable/disable per-kernel timing.
+    Profiler& profiler() { return profiler_; }
+
 private:
     const Model& model_;
     const ModelConfig& cfg_;
@@ -57,6 +61,8 @@ private:
     float*   d_absmax_;         // absmax scale (1 float)
     float*   d_logits_;         // output logits (vocab_size)
     float*   d_attn_scores_;    // attention scores (num_heads * max_seq_len)
+
+    Profiler profiler_;
 
     /// BitLinear: quantize → sparse ternary GEMV → dequantize.
     void bitlinear(const half* input, int input_size,

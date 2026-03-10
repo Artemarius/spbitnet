@@ -19,6 +19,11 @@ void rms_norm_gpu(const half* input, const float* weight, half* output,
 void absmax_quantize_gpu(const half* input, int8_t* output, float* d_absmax,
                          int size, cudaStream_t stream = nullptr);
 
+/// Absmax reduction only (no quantization). Writes max(|input|) to *d_absmax.
+/// Used with fused_sparse_bitlinear_gpu which quantizes inline.
+void absmax_reduce_gpu(const half* input, float* d_absmax, int size,
+                       cudaStream_t stream = nullptr);
+
 /// Dequantize INT32 accumulator to float16: out[i] = int_in[i] * gamma * (*d_absmax) / 127.
 /// d_absmax is a device pointer written by absmax_quantize_gpu on the same stream.
 void dequantize_gpu(const int32_t* input, half* output, const float* d_absmax,

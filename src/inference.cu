@@ -105,17 +105,15 @@ void InferenceEngine::reset() {
 
 void InferenceEngine::bitlinear(const half* input, int input_size,
                                 const SparseLinear& layer, half* output) {
-    // 1. Absmax quantize: half → int8
-    absmax_quantize_gpu(input, d_quant_, d_absmax_, input_size);
+    // Fused path: absmax reduction + inline quantize + sparse GEMV + dequantize
+    // Reduces 3 kernel launches to 2 and eliminates intermediate buffers.
+    absmax_reduce_gpu(input, d_absmax_, input_size);
 
-    // 2. Sparse ternary GEMV: int8 → int32
-    sparse_ternary_gemv_gpu(layer.d_meta, layer.d_values,
-                            d_quant_, d_int_out_,
-                            layer.rows, layer.cols,
-                            layer.meta_stride, layer.values_stride);
-
-    // 3. Dequantize: int32 → half  (scale = gamma * absmax / 127)
-    dequantize_gpu(d_int_out_, output, d_absmax_, layer.gamma, layer.rows);
+    fused_sparse_bitlinear_gpu(layer.d_meta, layer.d_values,
+                                input, output,
+                                d_absmax_, layer.gamma,
+                                layer.rows, layer.cols,
+                                layer.meta_stride, layer.values_stride);
 }
 
 // ---------------------------------------------------------------------------
@@ -135,11 +133,13 @@ const float* InferenceEngine::forward(int token_id) {
     // =====================================================================
     // 1. Embedding lookup
     // =====================================================================
+    profiler_.begin("embed_lookup");
     CUDA_CHECK(cudaMemcpy(
         d_x_,
         model_.embed_tokens() + static_cast<size_t>(token_id) * H,
         H * sizeof(half),
         cudaMemcpyDeviceToDevice));
+    profiler_.end();
 
     // =====================================================================
     // 2. Transformer layers
@@ -152,95 +152,131 @@ const float* InferenceEngine::forward(int token_id) {
                               cudaMemcpyDeviceToDevice));
 
         // ----- Pre-attention RMSNorm -----
-        // Read from d_residual_ (saved input), write to d_x_
+        profiler_.begin("rms_norm");
         rms_norm_gpu(d_residual_, layer.d_input_layernorm,
                      d_x_, H, cfg_.rms_norm_eps);
+        profiler_.end();
 
         // ----- Q, K, V projections (BitLinear) -----
+        profiler_.begin("bitlinear_qkv");
         bitlinear(d_x_, H, layer.q_proj, d_q_);    // → (n_heads * hd)
         bitlinear(d_x_, H, layer.k_proj, d_kv_);   // → (n_kv * hd)
+        profiler_.end();
 
         // Apply RoPE to Q and K
+        profiler_.begin("rope");
         rope_gpu(d_q_,  n_heads, hd, pos, cfg_.rope_theta);
         rope_gpu(d_kv_, n_kv,    hd, pos, cfg_.rope_theta);
+        profiler_.end();
 
         // Store K in cache
+        profiler_.begin("scatter_kv");
         scatter_kv_gpu(d_kv_, d_k_cache_[l], n_kv, hd, max_seq, pos);
+        profiler_.end();
 
         // V projection — reuses d_kv_ (K already copied to cache)
+        profiler_.begin("bitlinear_v");
         bitlinear(d_x_, H, layer.v_proj, d_kv_);   // → (n_kv * hd)
+        profiler_.end();
 
         // Store V in cache
+        profiler_.begin("scatter_kv");
         scatter_kv_gpu(d_kv_, d_v_cache_[l], n_kv, hd, max_seq, pos);
+        profiler_.end();
 
         // ----- Attention -----
         float attn_scale = 1.0f / sqrtf(static_cast<float>(hd));
 
-        // Q · K^T / sqrt(d_k) for all heads and all positions 0..pos
+        profiler_.begin("attn_scores");
         attention_scores_gpu(d_q_, d_k_cache_[l], d_attn_scores_,
                              n_heads, n_kv, hd, max_seq, seq_len, attn_scale);
+        profiler_.end();
 
-        // Softmax
+        profiler_.begin("softmax");
         softmax_gpu(d_attn_scores_, n_heads, max_seq, seq_len);
+        profiler_.end();
 
-        // Weighted sum of V → d_x_ (hidden_size = n_heads * hd)
+        profiler_.begin("attn_output");
         attention_output_gpu(d_attn_scores_, d_v_cache_[l], d_x_,
                              n_heads, n_kv, hd, max_seq, seq_len);
+        profiler_.end();
 
         // ----- Output projection -----
+        profiler_.begin("bitlinear_o");
         bitlinear(d_x_, H, layer.o_proj, d_q_);  // d_q_ as temp
+        profiler_.end();
 
         // SubLN: attention sub-normalization (before residual add)
         if (layer.d_attn_sub_norm) {
+            profiler_.begin("rms_norm");
             rms_norm_gpu(d_q_, layer.d_attn_sub_norm, d_q_, H, cfg_.rms_norm_eps);
+            profiler_.end();
         }
 
         // Residual add
+        profiler_.begin("residual_add");
         residual_add_gpu(d_q_, d_residual_, d_x_, H);
+        profiler_.end();
 
         // ----- Save residual for MLP block -----
         CUDA_CHECK(cudaMemcpy(d_residual_, d_x_, H * sizeof(half),
                               cudaMemcpyDeviceToDevice));
 
         // ----- Post-attention RMSNorm -----
+        profiler_.begin("rms_norm");
         rms_norm_gpu(d_residual_, layer.d_post_attention_layernorm,
                      d_x_, H, cfg_.rms_norm_eps);
+        profiler_.end();
 
         // ----- MLP (gated with ReLU²) -----
+        profiler_.begin("bitlinear_mlp");
         bitlinear(d_x_, H, layer.gate_proj, d_gate_);  // → (inter)
         bitlinear(d_x_, H, layer.up_proj,   d_up_);    // → (inter)
+        profiler_.end();
 
         // ReLU²(gate) * up → float32 buffer (avoids float16 overflow).
         // relu²(x) can produce values >> 65504 before sub-norm normalizes them.
         // Safe to reuse d_int_out_ here — it's only used inside bitlinear().
         float* d_mlp_f32 = reinterpret_cast<float*>(d_int_out_);
+        profiler_.begin("relu2_mul");
         relu2_mul_f32_gpu(d_gate_, d_up_, d_mlp_f32, inter);
+        profiler_.end();
 
         // SubLN: FFN sub-normalization (float32 input → float16 output)
+        profiler_.begin("rms_norm");
         if (layer.d_ffn_sub_norm) {
             rms_norm_f32in_gpu(d_mlp_f32, layer.d_ffn_sub_norm, d_gate_,
                                inter, cfg_.rms_norm_eps);
         } else {
             float_to_half_gpu(d_mlp_f32, d_gate_, inter);
         }
+        profiler_.end();
 
         // Down projection
+        profiler_.begin("bitlinear_down");
         bitlinear(d_gate_, inter, layer.down_proj, d_q_);  // → (H)
+        profiler_.end();
 
         // Residual add
+        profiler_.begin("residual_add");
         residual_add_gpu(d_q_, d_residual_, d_x_, H);
+        profiler_.end();
     }
 
     // =====================================================================
     // 3. Final RMSNorm
     // =====================================================================
+    profiler_.begin("rms_norm");
     rms_norm_gpu(d_x_, model_.final_norm(), d_residual_, H, cfg_.rms_norm_eps);
+    profiler_.end();
 
     // =====================================================================
     // 4. LM head: logits = lm_head @ hidden_state
     // =====================================================================
+    profiler_.begin("lm_head");
     half_gemv_gpu(model_.lm_head(), d_residual_, d_logits_,
                   cfg_.vocab_size, H);
+    profiler_.end();
 
     seq_len_++;
     return d_logits_;

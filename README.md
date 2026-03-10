@@ -129,12 +129,38 @@ cuSPARSELt's Sparse Tensor Cores give **3.4-5.0x speedup** over cuBLAS at batch 
 | GEMV (n=1, autoregressive) | **Custom sparse ternary** | cuSPARSELt can't do n=1; our kernel beats cuBLAS |
 | Batched GEMM (n=16+) | **cuSPARSELt** | Sparse Tensor Cores give 3-5x over dense cuBLAS |
 
-### Future Benchmarks
+### Phase 6: End-to-End Inference Performance
 
-| Benchmark | Status |
-|-----------|--------|
-| End-to-end tok/s (2B model) | Phase 5 |
-| Nsight Compute profiling | Phase 6 |
+BitNet-2B-4T (2.4B parameters) generating text with greedy decoding:
+
+| Metric | Value |
+|--------|-------|
+| Decode throughput | **37.8 tok/s** (26.4 ms/tok) |
+| Prefill throughput | 38.4 tok/s |
+| Peak VRAM | 2566 MB / 6144 MB |
+| Weight memory | 1049 MB (391 MB sparse + 657 MB embedding) |
+
+#### Per-Kernel Time Breakdown
+
+| Kernel | % of Forward | Description |
+|--------|-------------|-------------|
+| BitLinear MLP (gate+up) | 36.1% | 2x sparse ternary GEMV, 6912x2560 |
+| BitLinear down | 18.2% | Sparse ternary GEMV, 2560x6912 |
+| BitLinear QKV | 10.5% | Q+K sparse ternary GEMVs |
+| LM head | 9.2% | Half-precision GEMV, 128256x2560 |
+| RMSNorm | 7.8% | Pre/post-attention + SubLN norms |
+| BitLinear O+V | 10.7% | Output + value projections |
+| Attention + RoPE + misc | 7.5% | Scores, softmax, output, residual |
+
+BitLinear (sparse ternary GEMV) accounts for ~76% of total inference time and is memory-bandwidth bound. The fused BitLinear kernel (absmax reduction + inline quantize + sparse GEMV + dequantize) reduces kernel launch overhead by 210 launches per token compared to the naive 3-kernel approach.
+
+#### Optimization Results
+
+| Optimization | Speedup |
+|---|---|
+| Fused BitLinear (3 kernels → 2) | **+15.6%** (32.7 → 37.8 tok/s) |
+| Float4 vectorized lm_head | +1.2% |
+| Shared memory x preload | Rejected (syncthreads > L1 benefit) |
 
 ## Build
 
@@ -175,7 +201,13 @@ python python/convert_model.py --model microsoft/bitnet-b1.58-2B-4T-bf16 --dry-r
 # Run inference (loads tokenizer from model dir for text I/O)
 ./build/spbitnet_infer --model models/bitnet-2b-4t-sparse/ --prompt "Hello" --max-tokens 32
 
-# Run kernel benchmarks
+# Benchmark: warmup + 3 timed runs, reports tok/s
+./build/spbitnet_infer --model models/bitnet-2b-4t-sparse/ --benchmark 128 --prompt "The future of AI is"
+
+# Profile: per-kernel timing breakdown
+./build/spbitnet_infer --model models/bitnet-2b-4t-sparse/ --benchmark 32 --profile
+
+# Run kernel micro-benchmarks (GEMV comparison)
 ./build/spbitnet_bench
 ```
 
@@ -195,6 +227,7 @@ spbitnet/
 │   ├── model.h                       # Model loader (config, weights, GPU upload)
 │   ├── inference.h                   # InferenceEngine: KV-cache, forward pass, generation
 │   ├── inference_kernels.h           # Inference kernel wrappers (RMSNorm, RoPE, attention, etc.)
+│   ├── profiler.h                    # Per-kernel CUDA event profiler (zero-overhead when disabled)
 │   └── tokenizer.h                   # Byte-level BPE tokenizer (Llama 3 / GPT-4 compatible)
 ├── src/
 │   ├── kernels/
@@ -205,7 +238,7 @@ spbitnet/
 │   ├── model.cu                      # Model loading: JSON parsing, binary I/O, GPU upload
 │   ├── inference.cu                  # Transformer forward pass + BitLinear orchestration
 │   ├── tokenizer.cpp                 # BPE tokenizer: JSON loading, encode/decode, byte mapping
-│   └── main.cpp                      # CLI entry point (--model, --prompt, --max-tokens)
+│   └── main.cpp                      # CLI entry point (--model, --prompt, --benchmark, --profile)
 ├── python/
 │   ├── convert_model.py              # HuggingFace → spbitnet format (2:4 sparsity + pack)
 │   ├── generate_sparse_mask.py       # 2:4 mask generation + binary export (standalone)

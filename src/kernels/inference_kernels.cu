@@ -108,6 +108,40 @@ __global__ void absmax_quantize_kernel(const half* __restrict__ input,
 }
 
 // ---------------------------------------------------------------------------
+// Absmax reduction only (no quantization)
+// Writes max(|input|) to d_absmax. Used by fused BitLinear path.
+// ---------------------------------------------------------------------------
+__global__ void absmax_reduce_kernel(const half* __restrict__ input,
+                                      float* __restrict__ d_absmax,
+                                      int size) {
+    __shared__ float shared_max[8];
+
+    const int tid  = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+    const int num_warps = blockDim.x >> 5;
+
+    float local_max = 0.0f;
+    for (int i = tid; i < size; i += blockDim.x) {
+        float val = fabsf(__half2float(input[i]));
+        local_max = fmaxf(local_max, val);
+    }
+
+    for (int offset = 16; offset > 0; offset >>= 1)
+        local_max = fmaxf(local_max, __shfl_down_sync(0xFFFFFFFF, local_max, offset));
+
+    if (lane == 0) shared_max[warp] = local_max;
+    __syncthreads();
+
+    if (warp == 0) {
+        float val = (lane < num_warps) ? shared_max[lane] : 0.0f;
+        for (int offset = 16; offset > 0; offset >>= 1)
+            val = fmaxf(val, __shfl_down_sync(0xFFFFFFFF, val, offset));
+        if (lane == 0) *d_absmax = val;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Dequantize INT32 → float16
 //
 // out[i] = (float)int_in[i] * gamma * (*d_absmax) / 127.0
@@ -438,11 +472,32 @@ __global__ void half_gemv_kernel(const half* __restrict__ W,
     const half* row = W + static_cast<size_t>(warp_id) * cols;
     float acc = 0.0f;
 
-    for (int j = lane; j < cols; j += 32) {
+    // Vectorized float4 loads: 16 bytes = 8 halfs per load instruction.
+    // Reduces load instruction count 8x vs scalar half loads.
+    const int cols_v = cols >> 3;  // cols / 8
+    const float4* row_v = reinterpret_cast<const float4*>(row);
+    const float4* x_v   = reinterpret_cast<const float4*>(x);
+
+    for (int j = lane; j < cols_v; j += 32) {
+        float4 w4 = row_v[j];
+        float4 x4 = x_v[j];
+        const half* wp = reinterpret_cast<const half*>(&w4);
+        const half* xp = reinterpret_cast<const half*>(&x4);
+
+        #pragma unroll
+        for (int k = 0; k < 8; ++k) {
+            acc += __half2float(wp[k]) * __half2float(xp[k]);
+        }
+    }
+
+    // Handle remainder elements (cols not divisible by 8)
+    const int tail_start = cols_v << 3;
+    for (int j = tail_start + lane; j < cols; j += 32) {
         acc += __half2float(row[j]) * __half2float(x[j]);
     }
 
     // Warp reduction
+    #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1)
         acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
 
@@ -464,6 +519,12 @@ void rms_norm_gpu(const half* input, const float* weight, half* output,
 void absmax_quantize_gpu(const half* input, int8_t* output, float* d_absmax,
                          int size, cudaStream_t stream) {
     absmax_quantize_kernel<<<1, 256, 0, stream>>>(input, output, d_absmax, size);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void absmax_reduce_gpu(const half* input, float* d_absmax, int size,
+                       cudaStream_t stream) {
+    absmax_reduce_kernel<<<1, 256, 0, stream>>>(input, d_absmax, size);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -570,6 +631,7 @@ void half_gemv_gpu(const half* W, const half* x, float* y, int rows, int cols,
     int warps_needed  = rows;
     int threads_total = warps_needed * 32;
     int grid = (threads_total + block - 1) / block;
+
     half_gemv_kernel<<<grid, block, 0, stream>>>(W, x, y, rows, cols);
     CUDA_CHECK(cudaGetLastError());
 }

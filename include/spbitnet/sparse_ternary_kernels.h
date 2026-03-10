@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <cstddef>
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 namespace spbitnet {
@@ -30,5 +31,20 @@ void sparse_ternary_gemv_gpu(const uint32_t* meta, const uint32_t* values,
                               int rows, int cols,
                               int meta_row_stride, int values_row_stride,
                               cudaStream_t stream = nullptr);
+
+// Fused BitLinear: absmax quantize on-the-fly + sparse ternary GEMV + dequantize.
+// Combines the 3 separate kernels (absmax_quantize + sparse_ternary_gemv + dequantize)
+// into a single kernel call. Requires d_absmax to be pre-computed by absmax_reduce_gpu.
+//
+// x: half input (not pre-quantized — quantization happens inline)
+// output: half output (dequantized)
+// d_absmax: device pointer to absmax of x (written by absmax_reduce_gpu)
+// gamma: per-tensor dequantization scale
+void fused_sparse_bitlinear_gpu(const uint32_t* meta, const uint32_t* values,
+                                 const half* x, half* output,
+                                 const float* d_absmax, float gamma,
+                                 int rows, int cols,
+                                 int meta_row_stride, int values_row_stride,
+                                 cudaStream_t stream = nullptr);
 
 } // namespace spbitnet

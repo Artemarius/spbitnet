@@ -163,6 +163,70 @@ __global__ void sparse_ternary_gemv_kernel(const uint32_t* __restrict__ meta,
 }
 
 // ---------------------------------------------------------------------------
+// Kernel: fused_sparse_bitlinear_kernel
+// Combines absmax quantization + sparse ternary GEMV + dequantization
+// into a single kernel. Requires d_absmax pre-computed by absmax_reduce_gpu.
+//
+// Each warp quantizes x on-the-fly, accumulates in int32, and dequantizes
+// the result. Eliminates the intermediate d_quant_ and d_int_out_ buffers
+// and saves 1 kernel launch per BitLinear layer.
+// ---------------------------------------------------------------------------
+__global__ void fused_sparse_bitlinear_kernel(
+        const uint32_t* __restrict__ meta,
+        const uint32_t* __restrict__ values,
+        const half* __restrict__ x,
+        half* __restrict__ output,
+        const float* __restrict__ d_absmax,
+        float gamma,
+        int rows, int cols,
+        int meta_row_stride,
+        int values_row_stride) {
+    const int lane = threadIdx.x % 32;
+    const int warp_id = (static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x) / 32;
+    const int row = warp_id;
+
+    if (row >= rows) return;
+
+    // Read absmax (written by absmax_reduce_gpu on same stream)
+    const float absmax = *d_absmax;
+    const float quant_scale = (absmax > 0.0f) ? 127.0f / absmax : 0.0f;
+
+    const int groups_per_row = cols / 4;
+    const uint32_t* meta_row = meta + static_cast<size_t>(row) * meta_row_stride;
+    const uint32_t* vals_row = values + static_cast<size_t>(row) * values_row_stride;
+
+    int32_t acc = 0;
+
+    for (int g = lane; g < groups_per_row; g += 32) {
+        const uint32_t bitmap = (meta_row[g / 8] >> ((g % 8) * 4)) & 0xF;
+        const uint32_t signs = (vals_row[g / 16] >> ((g % 16) * 2)) & 0x3;
+        const Pos2 pos = kBitmapToPos[bitmap];
+        const int base_col = g * 4;
+
+        // Quantize x on-the-fly: half → int8 (same math as absmax_quantize)
+        float f0 = __half2float(x[base_col + pos.p0]) * quant_scale;
+        float f1 = __half2float(x[base_col + pos.p1]) * quant_scale;
+        int32_t x0 = max(-128, min(127, __float2int_rn(f0)));
+        int32_t x1 = max(-128, min(127, __float2int_rn(f1)));
+
+        acc += (signs & 1u) ? -x0 : x0;
+        acc += (signs & 2u) ? -x1 : x1;
+    }
+
+    // Warp-level reduction
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+    }
+
+    // Dequantize and write: out = acc * gamma * absmax / 127
+    if (lane == 0) {
+        float dequant_scale = gamma * absmax / 127.0f;
+        output[row] = __float2half(static_cast<float>(acc) * dequant_scale);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Host launch wrappers
 // ---------------------------------------------------------------------------
 
@@ -197,6 +261,25 @@ void sparse_ternary_gemv_gpu(const uint32_t* meta, const uint32_t* values,
 
     sparse_ternary_gemv_kernel<<<grid_size, block_size, 0, stream>>>(
         meta, values, x, y, rows, cols, meta_row_stride, values_row_stride);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void fused_sparse_bitlinear_gpu(const uint32_t* meta, const uint32_t* values,
+                                 const half* x, half* output,
+                                 const float* d_absmax, float gamma,
+                                 int rows, int cols,
+                                 int meta_row_stride, int values_row_stride,
+                                 cudaStream_t stream) {
+    if (rows == 0 || cols == 0) return;
+
+    constexpr int block_size = 256;
+    const int warps_needed = rows;
+    const int threads_needed = warps_needed * 32;
+    const int grid_size = (threads_needed + block_size - 1) / block_size;
+
+    fused_sparse_bitlinear_kernel<<<grid_size, block_size, 0, stream>>>(
+        meta, values, x, output, d_absmax, gamma,
+        rows, cols, meta_row_stride, values_row_stride);
     CUDA_CHECK(cudaGetLastError());
 }
 
