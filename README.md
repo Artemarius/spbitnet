@@ -199,10 +199,12 @@ cmake --build build -j$(nproc)
 ### Quick Start
 
 ```bash
-# Install Python dependencies (for model conversion only)
-pip install -r python/requirements.txt
+# Option A: Download pre-converted weights from the GitHub release (recommended)
+# https://github.com/Artemarius/spbitnet/releases/tag/v1.0.0
+tar xzf bitnet-2b-4t-sparse.tar.gz -C models/
 
-# Convert a BitNet model (downloads bf16 weights, applies 2:4 sparsity, packs)
+# Option B: Convert from HuggingFace (requires Python + ~5 GB download)
+pip install -r python/requirements.txt
 python python/convert_model.py \
     --model microsoft/bitnet-b1.58-2B-4T-bf16 \
     --output models/bitnet-2b-4t-sparse/
@@ -301,4 +303,4 @@ The custom kernel exploits both properties simultaneously: sparse iteration (ski
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE). Pre-converted model weights are derived from Microsoft's MIT-licensed [BitNet-b1.58-2B-4T](https://huggingface.co/microsoft/BitNet-b1.58-2B-4T); see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
