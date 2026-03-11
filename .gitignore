@@ -50,3 +50,8 @@ Thumbs.db
 *.ncu-rep
 *.nsys-rep
 *.qdrep
+*.sqlite
+
+# Validation artifacts
+cpp_output.json
+ref_output.json

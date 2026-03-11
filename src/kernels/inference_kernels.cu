@@ -4,7 +4,9 @@
 namespace spbitnet {
 
 // ---------------------------------------------------------------------------
-// RMSNorm: y[i] = x[i] * w[i] * rsqrt(mean(x^2) + eps)
+// RMSNorm: y[i] = x[i] * w[i] / RMS(x),  RMS(x) = sqrt(mean(x^2) + eps)
+//
+// Ref: Zhang & Sennrich, "Root Mean Square Layer Normalization" (2019)
 //
 // Single-block kernel (one normalization at a time for autoregressive).
 // Block of 256 threads handles up to ~8K elements.
@@ -54,7 +56,11 @@ __global__ void rms_norm_kernel(const half* __restrict__ input,
 }
 
 // ---------------------------------------------------------------------------
-// Absmax INT8 quantization
+// Absmax INT8 quantization (BitLinear step 1)
+//
+// Ref: Ma et al., "The Era of 1-bit LLMs" (2024), Eq. (2):
+//   Q_b = RoundClip(x * Q_b / gamma, -Q_b, Q_b), where Q_b = 2^(b-1) = 128
+//   gamma = max(|x|) (absmax scaling)
 //
 // Single-block kernel.  Computes max(|x|), then quantizes:
 //   q[i] = round(x[i] * 127 / absmax), clamped to [-128, 127].
@@ -142,7 +148,13 @@ __global__ void absmax_reduce_kernel(const half* __restrict__ input,
 }
 
 // ---------------------------------------------------------------------------
-// Dequantize INT32 → float16
+// Dequantize INT32 → float16 (BitLinear step 3)
+//
+// Ref: Ma et al., "The Era of 1-bit LLMs" (2024), Eq. (4):
+//   y = W_q * x_q * (gamma_w * gamma_x / Q_b)
+// Here: gamma_w = gamma (per-tensor from weight quantization),
+//        gamma_x = absmax (per-token from activation quantization),
+//        Q_b = 127 (INT8 range).
 //
 // out[i] = (float)int_in[i] * gamma * (*d_absmax) / 127.0
 // d_absmax is written by absmax_quantize on the same stream (ordering OK).
@@ -160,6 +172,9 @@ __global__ void dequantize_kernel(const int32_t* __restrict__ input,
 
 // ---------------------------------------------------------------------------
 // Rotary Positional Embeddings (RoPE)
+//
+// Ref: Su et al., "RoFormer: Enhanced Transformer with Rotary Position
+//      Embedding" (2022), Eq. (34).
 //
 // Applied in-place to a (num_heads, head_dim) vector.
 // For each dimension pair (2i, 2i+1):
@@ -212,7 +227,12 @@ __global__ void scatter_kv_kernel(const half* __restrict__ src,
 }
 
 // ---------------------------------------------------------------------------
-// Attention scores
+// Attention scores (scaled dot-product attention, GQA)
+//
+// Ref: Vaswani et al., "Attention Is All You Need" (2017), Eq. (1):
+//   Attention(Q,K,V) = softmax(QK^T / sqrt(d_k)) V
+// Ref: Ainslie et al., "GQA: Training Generalized Multi-Query Transformer
+//      Models" (2023) — grouped query attention for KV head sharing.
 //
 // score[h][j] = dot(Q[h], K_cache[kv_h, j]) * scale
 // Each warp computes one (head, position) dot product.
@@ -323,7 +343,9 @@ __global__ void softmax_kernel(float* __restrict__ scores,
 //
 // out[h][d] = sum_j score[h][j] * V_cache[kv_h, j, d]
 // One block per head, head_dim threads (one per output dim).
-// TODO Phase 6: increase parallelism for long sequences.
+// Note: for batch-1 autoregressive inference, seq_len grows incrementally
+// and one block per head is sufficient. For longer prefill sequences,
+// consider multi-block reduction over the sequence dimension.
 // ---------------------------------------------------------------------------
 __global__ void attention_output_kernel(const float* __restrict__ scores,
                                         const half* __restrict__ V_cache,
@@ -349,7 +371,9 @@ __global__ void attention_output_kernel(const float* __restrict__ scores,
 }
 
 // ---------------------------------------------------------------------------
-// Fused ReLU² + element-wise multiply
+// Fused ReLU² + element-wise multiply (BitNet MLP activation)
+// Ref: Wang et al., "BitNet b1.58-2B-4T Technical Report" (2025) — uses
+//      relu2 (squared ReLU) as the gated MLP activation function.
 // out[i] = max(0, gate[i])^2 * up[i]
 // ---------------------------------------------------------------------------
 __global__ void relu2_mul_kernel(const half* __restrict__ gate,

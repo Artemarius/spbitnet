@@ -8,13 +8,19 @@ The Sparse-BitNet paper shows that 1.58-bit ternary models are naturally compati
 
 spbitnet exploits the fact that ternary weights {-1, 0, +1} combined with 2:4 sparsity eliminate multiplications entirely — inference becomes pure integer addition/subtraction on a sparse subset of activations, with hardware Sparse Tensor Core acceleration on Ampere GPUs.
 
+## Performance
+
+**58.3 tok/s** decode on RTX 3060 Laptop (BitNet-2B-4T 2.4B, 2.6 GB VRAM, greedy decoding)
+
+![Kernel Breakdown](docs/plots/kernel_breakdown.png)
+
 ## Key Contributions
 
-- **Custom ternary-sparse CUDA kernels** — fused kernels that exploit both ternary arithmetic (no multiplies) and 2:4 sparsity (skip half the work), outperforming general-purpose sparse GEMM libraries
-- **cuSPARSELt integration** — baseline implementation using NVIDIA's hardware sparse GEMM path for comparison
+- **Custom ternary-sparse CUDA kernels** — fused kernels that exploit both ternary arithmetic (no multiplies) and 2:4 sparsity (skip half the work), matching or beating cuBLAS INT8 while reading 5.3x less data
+- **cuSPARSELt integration** — hardware sparse GEMM baseline using Sparse Tensor Cores (3-5x over cuBLAS at batch 16+)
 - **Compressed weight format** — separated meta (4-bit bitmaps) + values (2-bit signs) arrays, 1.5 bits per parameter with GPU-coalesced access
 - **Consumer GPU benchmarks** — real performance numbers on RTX 3060 (6 GB VRAM), not datacenter hardware
-- **End-to-end inference** — load a real BitNet model, apply sparsity masks, generate text
+- **End-to-end inference** — load a real BitNet model, apply sparsity masks, generate text at 58 tok/s
 
 ## Architecture
 
@@ -61,9 +67,9 @@ Computation:        sub, add            sub, sub            (no multiplies!)
 
 | Model | Parameters | Dense VRAM | Sparse VRAM | Status |
 |-------|-----------|-----------|-------------|--------|
-| BitNet b1.58-large | 729M | ~0.2 GB | ~0.1 GB | Phase 5 |
-| BitNet b1.58-2B-4T | 2.4B | ~0.5 GB | ~0.3 GB | Phase 5 |
-| Falcon3-1B-1.58bit | 1B | ~0.2 GB | ~0.15 GB | Phase 5 |
+| BitNet b1.58-2B-4T | 2.4B | ~0.5 GB | ~0.3 GB | Tested (58.3 tok/s) |
+| BitNet b1.58-large | 729M | ~0.2 GB | ~0.1 GB | Untested |
+| Falcon3-1B-1.58bit | 1B | ~0.2 GB | ~0.15 GB | Untested |
 
 ## Benchmarks
 
@@ -129,14 +135,12 @@ cuSPARSELt's Sparse Tensor Cores give **3.4-5.0x speedup** over cuBLAS at batch 
 | GEMV (n=1, autoregressive) | **Custom sparse ternary** | cuSPARSELt can't do n=1; our kernel beats cuBLAS |
 | Batched GEMM (n=16+) | **cuSPARSELt** | Sparse Tensor Cores give 3-5x over dense cuBLAS |
 
-### Phase 6: End-to-End Inference Performance
-
-BitNet-2B-4T (2.4B parameters) generating text with greedy decoding:
+### End-to-End Inference (BitNet-2B-4T, 2.4B params)
 
 | Metric | Value |
 |--------|-------|
-| Decode throughput | **37.8 tok/s** (26.4 ms/tok) |
-| Prefill throughput | 38.4 tok/s |
+| Decode throughput | **58.3 tok/s** (17.1 ms/tok) |
+| Prefill throughput | 60.7 tok/s |
 | Peak VRAM | 2566 MB / 6144 MB |
 | Weight memory | 1049 MB (391 MB sparse + 657 MB embedding) |
 
@@ -144,23 +148,31 @@ BitNet-2B-4T (2.4B parameters) generating text with greedy decoding:
 
 | Kernel | % of Forward | Description |
 |--------|-------------|-------------|
-| BitLinear MLP (gate+up) | 36.1% | 2x sparse ternary GEMV, 6912x2560 |
-| BitLinear down | 18.2% | Sparse ternary GEMV, 2560x6912 |
-| BitLinear QKV | 10.5% | Q+K sparse ternary GEMVs |
-| LM head | 9.2% | Half-precision GEMV, 128256x2560 |
-| RMSNorm | 7.8% | Pre/post-attention + SubLN norms |
-| BitLinear O+V | 10.7% | Output + value projections |
-| Attention + RoPE + misc | 7.5% | Scores, softmax, output, residual |
+| BitLinear MLP (gate+up) | 31.5% | 2x fused sparse ternary GEMV, 6912x2560 |
+| BitLinear down | 17.1% | Fused sparse ternary GEMV, 2560x6912 |
+| LM head | 12.6% | Half-precision GEMV, 128256x2560 (92.7% BW util) |
+| BitLinear QKV | 10.2% | Q+K fused sparse ternary GEMVs |
+| RMSNorm | 8.9% | Pre/post-attention + SubLN norms |
+| BitLinear O+V | 10.6% | Output + value projections |
+| Attention + RoPE + misc | 9.1% | Scores, softmax, output, residual |
 
-BitLinear (sparse ternary GEMV) accounts for ~76% of total inference time and is memory-bandwidth bound. The fused BitLinear kernel (absmax reduction + inline quantize + sparse GEMV + dequantize) reduces kernel launch overhead by 210 launches per token compared to the naive 3-kernel approach.
+BitLinear (sparse ternary GEMV) accounts for ~70% of total inference time and is memory-bandwidth bound. The bottleneck is fundamental: 1047 MB must be read from VRAM per token (391 MB sparse weights + 657 MB embedding), achieving 61 GB/s of the 336 GB/s peak bandwidth (18%).
+
+![GEMV Comparison](docs/plots/gemv_comparison.png)
 
 #### Optimization Results
 
 | Optimization | Speedup |
 |---|---|
-| Fused BitLinear (3 kernels → 2) | **+15.6%** (32.7 → 37.8 tok/s) |
-| Float4 vectorized lm_head | +1.2% |
+| Fused BitLinear (3 kernels → 2) | **+15.6%** (50.4 → 58.3 tok/s) |
+| Float4 vectorized lm_head | +1.2% (92.7% BW utilization) |
 | Shared memory x preload | Rejected (syncthreads > L1 benefit) |
+
+![Optimization Impact](docs/plots/optimization_impact.png)
+
+#### Memory Efficiency
+
+![Memory Usage](docs/plots/memory_usage.png)
 
 ## Build
 
@@ -242,7 +254,11 @@ spbitnet/
 ├── python/
 │   ├── convert_model.py              # HuggingFace → spbitnet format (2:4 sparsity + pack)
 │   ├── generate_sparse_mask.py       # 2:4 mask generation + binary export (standalone)
+│   ├── plot_benchmarks.py            # Generate benchmark charts (matplotlib)
+│   ├── analyze_profile.py            # Bandwidth roofline & occupancy analysis
 │   └── requirements.txt              # Python dependencies (torch, transformers, etc.)
+├── scripts/
+│   └── profile_ncu.sh               # Nsight Compute profiling script
 ├── tests/
 │   ├── test_ternary_pack.cu          # Dense: pack/unpack roundtrip, GPU unpack, GEMV
 │   ├── test_sparse_ternary.cu        # Sparse: pack/unpack, pruning, GPU unpack, GEMV
@@ -252,10 +268,11 @@ spbitnet/
 │   └── test_tokenizer.cpp           # Tokenizer: encode/decode roundtrip, BPE, byte fallback
 ├── benchmarks/
 │   └── bench_kernels.cu              # GEMV + GEMM benchmarks (all kernel variants)
-├── docs/                             # (planned)
-│   ├── kernel_design.md
-│   ├── compression_format.md
-│   └── benchmarks.md
+├── docs/
+│   ├── kernel_design.md              # Custom kernel design decisions and analysis
+│   ├── compression_format.md         # Sparse ternary weight format specification
+│   ├── benchmarks.md                 # Methodology, hardware details, reproducibility
+│   └── plots/                        # Benchmark visualization charts (PNG)
 └── models/                           # Downloaded/converted models (gitignored)
 ```
 
@@ -275,12 +292,12 @@ The custom kernel exploits both properties simultaneously: sparse iteration (ski
 
 ## References
 
-- Zhang et al., [Sparse-BitNet: 1.58-bit LLMs are Naturally Friendly to Semi-Structured Sparsity](https://arxiv.org/abs/2603.05168) (2026)
-- Wang et al., [BitNet: Scaling 1-bit Transformers for Large Language Models](https://arxiv.org/abs/2310.11453) (2023)
-- Ma et al., [The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits](https://arxiv.org/abs/2402.17764) (2024)
-- Microsoft, [bitnet.cpp: Efficient Edge Inference for Ternary LLMs](https://github.com/microsoft/BitNet) (2024)
-- Mishra et al., [Accelerating Sparse Deep Neural Networks](https://arxiv.org/abs/2104.08378) (2021)
-- NVIDIA, [cuSPARSELt Documentation](https://docs.nvidia.com/cuda/cusparselt/)
+1. Zhang et al., [Sparse-BitNet: 1.58-bit LLMs are Naturally Friendly to Semi-Structured Sparsity](https://arxiv.org/abs/2603.05168) (2026) — the paper this project implements
+2. Ma et al., [The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits](https://arxiv.org/abs/2402.17764) (2024) — BitNet b1.58 architecture
+3. Wang et al., [BitNet b1.58-2B-4T Technical Report](https://arxiv.org/abs/2504.12285) (2025) — model we benchmark against
+4. Mishra et al., [Accelerating Sparse Deep Neural Networks](https://arxiv.org/abs/2104.08378) (2021) — NVIDIA's 2:4 structured sparsity
+5. Microsoft, [bitnet.cpp](https://github.com/microsoft/BitNet) — CPU-focused BitNet inference (our project is GPU-focused)
+6. NVIDIA, [cuSPARSELt Documentation](https://docs.nvidia.com/cuda/cusparselt/) — hardware sparse GEMM library
 
 ## License
 

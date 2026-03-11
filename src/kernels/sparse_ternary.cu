@@ -6,6 +6,11 @@ namespace spbitnet {
 // ---------------------------------------------------------------------------
 // Compressed Sparse-Ternary format (2:4 structured sparsity)
 //
+// Ref: Zhang et al., "Sparse-BitNet: 1.58-bit LLMs are Naturally Friendly
+//      to Semi-Structured Sparsity" (arXiv:2603.05168, 2026), Section 3.2.
+// Ref: Mishra et al., "Accelerating Sparse Deep Neural Networks"
+//      (arXiv:2104.08378, 2021) — NVIDIA 2:4 structured sparsity.
+//
 // Meta array: 4-bit position bitmap per group of 4, 8 groups per uint32.
 //   Group g's bitmap: (meta_row[g/8] >> ((g%8)*4)) & 0xF
 //   Exactly 2 bits set in each bitmap.
@@ -164,6 +169,8 @@ __global__ void sparse_ternary_gemv_kernel(const uint32_t* __restrict__ meta,
 
 // ---------------------------------------------------------------------------
 // Kernel: fused_sparse_bitlinear_kernel
+// Fused implementation of the BitLinear layer from Ma et al. (2024):
+//   y = dequant(W_sparse * quant(x))
 // Combines absmax quantization + sparse ternary GEMV + dequantization
 // into a single kernel. Requires d_absmax pre-computed by absmax_reduce_gpu.
 //
